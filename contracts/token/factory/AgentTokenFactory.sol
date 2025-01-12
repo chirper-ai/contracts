@@ -1,141 +1,235 @@
-// file: contracts/token/factory/AgentTokenFactory.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
-import "../core/BondingManager.sol";
-import "../core/GraduatedToken.sol";
+
+import "../core/AgentBondingManager.sol";
+import "../core/AgentToken.sol";
+import "../libraries/ErrorLibrary.sol";
+import "../libraries/Constants.sol";
 
 /**
  * @title AgentTokenFactory
- * @author YourName
- * @notice Factory for deploying new bonding curve instances
- * @dev Creates and tracks new bonding curve managers and their tokens
+ * @notice Deploys a new AgentBondingManager and AgentToken, each behind ERC1967Proxy, 
+ *         so that both are upgradeable.
  */
-contract AgentTokenFactory is Initializable, OwnableUpgradeable, UUPSUpgradeable {
-    /// @notice Template implementation for BondingManager
-    address public bondingImplementation;
-
-    /// @notice Base asset used for all curves (e.g. USDC)
-    address public baseAsset;
-
-    /// @notice Mapping of deployed managers
-    mapping(address => bool) public isManager;
-
-    /// @notice List of all deployed managers
-    address[] public managers;
-
-    /// @dev Emitted when a new bonding curve is created
-    event BondingManagerCreated(
-        address indexed manager,
-        string name,
-        string symbol,
-        address token
-    );
+contract AgentTokenFactory is
+    Initializable,
+    AccessControlUpgradeable,
+    ReentrancyGuardUpgradeable,
+    PausableUpgradeable
+{
+    // ------------------------------------------------------------------------
+    // STRUCTS
+    // ------------------------------------------------------------------------
 
     /**
-     * @custom:oz-upgrades-unsafe-allow constructor
+     * @notice Configuration needed to deploy a new system
+     * @dev Adjust as needed for your use case
      */
-    constructor() {
-        _disableInitializers();
+    struct DeploymentConfig {
+        // AgentToken init args
+        string name;
+        string symbol;
+        address platform;  // platform admin for the token
+
+        // BondingManager init args
+        address baseAsset;       // e.g. USDC
+        address registry;        // tax vault or registry
+        address managerPlatform; // address with PLATFORM_ROLE in the manager
+
+        // Default config for the new BondingManager
+        // ( gradThreshold, dexAdapters, dexWeights, etc. )
+        AgentBondingManager.CurveConfig curveConfig;
     }
+
+    /**
+     * @notice Return object containing addresses of deployed contracts
+     */
+    struct DeployedSystem {
+        address managerProxy;  // The proxy for AgentBondingManager
+        address tokenProxy;    // The proxy for AgentToken
+    }
+
+    // ------------------------------------------------------------------------
+    // EVENTS
+    // ------------------------------------------------------------------------
+
+    event SystemDeployed(
+        DeployedSystem deployment,
+        DeploymentConfig config,
+        address indexed deployer,
+        uint256 timestamp
+    );
+
+    // ------------------------------------------------------------------------
+    // INITIALIZER
+    // ------------------------------------------------------------------------
 
     /**
      * @notice Initializes the factory
-     * @param bondingImpl_ Address of BondingManager implementation
-     * @param baseAsset_ Base asset address (e.g. USDC)
+     * @dev This replaces the constructor for upgradeable contracts
+     * @param admin The address that will receive DEFAULT_ADMIN_ROLE, UPGRADER_ROLE, PAUSER_ROLE
      */
-    function initialize(
-        address bondingImpl_,
-        address baseAsset_
-    ) external initializer {
-        __Ownable_init(msg.sender);
-        __UUPSUpgradeable_init();
+    function initialize(address admin) external initializer {
+        __AccessControl_init();
+        __ReentrancyGuard_init();
+        __Pausable_init();
 
-        require(bondingImpl_ != address(0), "Invalid implementation");
-        require(baseAsset_ != address(0), "Invalid base asset");
-
-        bondingImplementation = bondingImpl_;
-        baseAsset = baseAsset_;
+        // Set up roles
+        _setupRole(DEFAULT_ADMIN_ROLE, admin);
+        _setupRole(Constants.UPGRADER_ROLE, admin);
+        _setupRole(Constants.PAUSER_ROLE, admin);
     }
 
+    // ------------------------------------------------------------------------
+    // DEPLOY SYSTEM (Manager Proxy + Token Proxy)
+    // ------------------------------------------------------------------------
+
     /**
-     * @notice Creates a new bonding curve instance
-     * @param name Token name
-     * @param symbol Token symbol
-     * @param config Initial curve configuration
-     * @return manager Address of the new bonding manager
-     * @return token Address of the new token
+     * @notice Deploys and initializes a new AgentBondingManager and AgentToken, both behind ERC1967Proxy.
+     * @dev The Manager and Token each get their own implementation contract.
+     *      Alternatively, you could store a single "managerImpl" and "tokenImpl" in this factory
+     *      if you want to re-use the same logic each time, instead of redeploying a fresh logic contract.
+     *
+     * @param config The deployment configuration
+     * @return deployment Addresses of the proxies (managerProxy, tokenProxy)
      */
-    function createBondingCurve(
-        string memory name,
-        string memory symbol,
-        BondingManager.CurveConfig calldata config
-    ) external returns (address manager, address token) {
-        // Deploy proxy for BondingManager
-        bytes memory initData = abi.encodeWithSelector(
-            BondingManager.initialize.selector,
-            baseAsset,
-            config
+    function deploySystem(
+        DeploymentConfig calldata config
+    )
+        external
+        nonReentrant
+        whenNotPaused
+        returns (DeployedSystem memory deployment)
+    {
+        // Optional: validate config
+        _validateConfig(config);
+
+        // --------------------------------------------------------------------
+        // 1. Deploy the AgentBondingManager IMPLEMENTATION
+        // --------------------------------------------------------------------
+        AgentBondingManager managerImpl = new AgentBondingManager();
+
+        // Prepare the data for AgentBondingManager's initializer:
+        //   function initialize(
+        //       address _baseAsset,
+        //       address _registry,
+        //       address _platform,
+        //       CurveConfig calldata _config
+        //   ) external initializer
+        bytes memory managerInitData = abi.encodeWithSelector(
+            AgentBondingManager.initialize.selector,
+            config.baseAsset,
+            config.registry,
+            config.managerPlatform,
+            config.curveConfig
         );
 
-        ERC1967Proxy proxy = new ERC1967Proxy(
-            bondingImplementation,
-            initData
+        // Create the proxy, pointing to managerImpl, then call initialize(...)
+        ERC1967Proxy managerProxy = new ERC1967Proxy(
+            address(managerImpl),
+            managerInitData
         );
-        manager = address(proxy);
 
-        // Initialize manager
-        BondingManager bondingManager = BondingManager(manager);
-        token = bondingManager.launchToken(name, symbol);
+        // --------------------------------------------------------------------
+        // 2. Deploy the AgentToken IMPLEMENTATION
+        // --------------------------------------------------------------------
+        AgentToken tokenImpl = new AgentToken();
 
-        // Record manager
-        isManager[manager] = true;
-        managers.push(manager);
-
-        emit BondingManagerCreated(
-            manager,
-            name,
-            symbol,
-            token
+        // Prepare the initializer data for AgentToken:
+        //   function initialize(
+        //       string memory name_,
+        //       string memory symbol_,
+        //       address implementation,  // bondingContract
+        //       address registry,        // taxVault
+        //       address platform         // platform admin
+        //   ) external initializer
+        bytes memory tokenInitData = abi.encodeWithSelector(
+            AgentToken.initialize.selector,
+            config.name,
+            config.symbol,
+            address(managerProxy),  // let the manager be the bondingContract
+            config.registry,        // taxVault
+            config.platform         // platform admin (for the token)
         );
+
+        // Create the proxy, pointing to tokenImpl, then call initialize(...)
+        ERC1967Proxy tokenProxy = new ERC1967Proxy(
+            address(tokenImpl),
+            tokenInitData
+        );
+
+        // --------------------------------------------------------------------
+        // 3. Return the newly deployed proxies
+        // --------------------------------------------------------------------
+        DeployedSystem memory result = DeployedSystem({
+            managerProxy: address(managerProxy),
+            tokenProxy: address(tokenProxy)
+        });
+
+        // Emit an event
+        emit SystemDeployed(result, config, msg.sender, block.timestamp);
+
+        return result;
+    }
+
+    // ------------------------------------------------------------------------
+    // OPTIONAL VALIDATION
+    // ------------------------------------------------------------------------
+
+    function _validateConfig(DeploymentConfig calldata config) internal pure {
+        // Example checks
+        if (bytes(config.name).length == 0) {
+            revert ErrorLibrary.InvalidParameter("name", "Cannot be empty");
+        }
+        if (bytes(config.symbol).length == 0) {
+            revert ErrorLibrary.InvalidParameter("symbol", "Cannot be empty");
+        }
+        if (config.baseAsset == address(0)) {
+            revert ErrorLibrary.InvalidParameter("baseAsset", "Zero address");
+        }
+        if (config.registry == address(0)) {
+            revert ErrorLibrary.InvalidParameter("registry", "Zero address");
+        }
+        if (config.platform == address(0)) {
+            revert ErrorLibrary.InvalidParameter("platform", "Zero address");
+        }
+        if (config.managerPlatform == address(0)) {
+            revert ErrorLibrary.InvalidParameter("managerPlatform", "Zero address");
+        }
+
+        // Validate curve weights, threshold, etc. if needed
+        if (
+            config.curveConfig.dexAdapters.length != config.curveConfig.dexWeights.length
+        ) {
+            revert ErrorLibrary.InvalidParameter(
+                "curveConfig",
+                "DEX adapters/weights length mismatch"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // ADMIN (Pause/Unpause, etc.)
+    // ------------------------------------------------------------------------
+
+    /**
+     * @notice Pauses the factory so no new deployments can occur
+     */
+    function pauseFactory() external onlyRole(Constants.PAUSER_ROLE) {
+        _pause();
     }
 
     /**
-     * @notice Gets all deployed managers
-     * @return List of manager addresses
+     * @notice Unpauses the factory
      */
-    function getManagers() external view returns (address[] memory) {
-        return managers;
+    function unpauseFactory() external onlyRole(Constants.PAUSER_ROLE) {
+        _unpause();
     }
-
-    /**
-     * @notice Updates the bonding manager implementation
-     * @param newImplementation New implementation address
-     */
-    function updateBondingImplementation(address newImplementation) external onlyOwner {
-        require(newImplementation != address(0), "Invalid implementation");
-        bondingImplementation = newImplementation;
-    }
-
-    /**
-     * @notice Updates the base asset address
-     * @param newBaseAsset New base asset address
-     */
-    function updateBaseAsset(address newBaseAsset) external onlyOwner {
-        require(newBaseAsset != address(0), "Invalid asset");
-        baseAsset = newBaseAsset;
-    }
-
-    /**
-     * @dev Required by the UUPS module
-     */
-    function _authorizeUpgrade(address newImplementation)
-        internal
-        override
-        onlyOwner
-    {}
 }

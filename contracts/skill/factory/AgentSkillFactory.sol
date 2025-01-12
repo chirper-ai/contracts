@@ -139,12 +139,12 @@ contract AgentSkillFactory {
         if (config.admin != address(0)) {
             AgentSkillCore core = AgentSkillCore(address(proxy));
             core.grantRole(Constants.UPGRADER_ROLE, config.admin);
-            core.grantRole(Constants.FEE_MANAGER_ROLE, config.admin);
+            core.grantRole(Constants.TAX_MANAGER_ROLE, config.admin);
             core.grantRole(Constants.PAUSER_ROLE, config.admin);
             
             // Renounce deployer roles
             core.renounceRole(Constants.UPGRADER_ROLE, address(this));
-            core.renounceRole(Constants.FEE_MANAGER_ROLE, address(this));
+            core.renounceRole(Constants.TAX_MANAGER_ROLE, address(this));
             core.renounceRole(Constants.PAUSER_ROLE, address(this));
         }
 

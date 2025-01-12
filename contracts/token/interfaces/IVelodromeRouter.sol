@@ -1,10 +1,22 @@
-// file: contracts/interfaces/IVelodromeRouter.sol
+// file: contracts/token/interfaces/IVelodromeRouter.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "../libraries/ErrorLibrary.sol";
+
 interface IVelodromeRouter {
+    /**
+     * @notice Gets factory address
+     * @dev Reverts with InvalidAddress if factory is zero address
+     */
     function factory() external pure returns (address);
     
+    /**
+     * @notice Adds liquidity to a pair
+     * @dev Reverts with InsufficientLiquidity if amounts too low
+     * @dev Reverts with ExcessiveSlippage if slippage exceeds min amounts
+     * @dev Reverts with DeadlinePassed if deadline has passed
+     */
     function addLiquidity(
         address tokenA,
         address tokenB,

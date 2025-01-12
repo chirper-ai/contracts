@@ -84,7 +84,7 @@ contract AgentSkillCore is
         // Grant roles
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(Constants.UPGRADER_ROLE, msg.sender);
-        _grantRole(Constants.FEE_MANAGER_ROLE, msg.sender);
+        _grantRole(Constants.TAX_MANAGER_ROLE, msg.sender);
         _grantRole(Constants.PAUSER_ROLE, msg.sender);
         _grantRole(Constants.PLATFORM_ROLE, platform);
 
@@ -281,7 +281,7 @@ contract AgentSkillCore is
         }
 
         // Calculate execution fee
-        uint256 fee = (amount * Constants.EXECUTION_FEE_BPS) / Constants.BASIS_POINTS;
+        uint256 fee = (amount * Constants.EXECUTION_TAX_BPS) / Constants.BASIS_POINTS;
         uint256 remainingAmount = amount - fee;
 
         // Handle token transfers and fees

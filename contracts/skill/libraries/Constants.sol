@@ -17,7 +17,7 @@ library Constants {
    bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
 
    /// @notice Role identifier for fee manager role 
-   bytes32 public constant FEE_MANAGER_ROLE = keccak256("FEE_MANAGER_ROLE");
+   bytes32 public constant TAX_MANAGER_ROLE = keccak256("TAX_MANAGER_ROLE");
 
    /// @notice Role identifier for pauser role
    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
@@ -26,14 +26,14 @@ library Constants {
    bytes32 public constant PLATFORM_ROLE = keccak256("PLATFORM_ROLE");
 
    /*//////////////////////////////////////////////////////////////
-                             FEE CONFIG
+                             TAX CONFIG
    //////////////////////////////////////////////////////////////*/
 
    /// @notice Basis points denominator (100%)
    uint96 public constant BASIS_POINTS = 10000;
 
    /// @notice Execution fee in basis points (1%)
-   uint96 public constant EXECUTION_FEE_BPS = 100;
+   uint96 public constant EXECUTION_TAX_BPS = 100;
 
    /// @notice Trade royalty in basis points (2% total - 1% each to creator/platform)
    uint96 public constant TRADE_ROYALTY_BPS = 200;

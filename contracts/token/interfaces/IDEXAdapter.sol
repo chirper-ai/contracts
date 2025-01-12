@@ -1,14 +1,22 @@
-// file: contracts/interfaces/IDEXAdapter.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "../libraries/ErrorLibrary.sol";
+
 /**
  * @title IDEXAdapter
- * @author YourName
+ * @author ChirperAI
  * @notice Interface for DEX adapters used in graduation
  * @dev Standardizes interaction with different DEX implementations
  */
 interface IDEXAdapter {
+    // Add tax configuration
+    struct TaxConfig {
+        address taxVault;
+        uint256 buyTax;
+        uint256 sellTax;
+    }
+
     /**
      * @notice Parameters for liquidity operations
      * @param tokenA First token address
@@ -37,6 +45,9 @@ interface IDEXAdapter {
      * @return amountA Amount of tokenA used
      * @return amountB Amount of tokenB used
      * @return liquidity Amount of LP tokens minted
+     * @dev Reverts with DexAddLiquidityFailed if operation fails
+     * @dev Reverts with ExcessiveSlippage if slippage exceeds limits
+     * @dev Reverts with DeadlinePassed if deadline has passed
      */
     function addLiquidity(
         LiquidityParams calldata params
@@ -51,12 +62,14 @@ interface IDEXAdapter {
     /**
      * @notice Gets the router contract address
      * @return Router address
+     * @dev Reverts with InvalidAddress if router is zero address
      */
     function getRouterAddress() external view returns (address);
 
     /**
      * @notice Gets the factory contract address
      * @return Factory address
+     * @dev Reverts with InvalidAddress if factory is zero address
      */
     function getFactoryAddress() external view returns (address);
 
@@ -65,6 +78,7 @@ interface IDEXAdapter {
      * @param tokenA First token
      * @param tokenB Second token
      * @return Pair address
+     * @dev Reverts with InvalidAddress if either token is zero address
      */
     function getPair(
         address tokenA,
