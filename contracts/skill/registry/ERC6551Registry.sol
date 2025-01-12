@@ -1,4 +1,4 @@
-// file: contracts/registry/ERC6551Registry.sol
+// file: contracts/skill/registry/ERC6551Registry.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 

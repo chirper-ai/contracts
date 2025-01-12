@@ -1,4 +1,4 @@
-// file: contracts/interfaces/IAgentSkillEvents.sol
+// file: contracts/skill/interfaces/IAgentSkillEvents.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 

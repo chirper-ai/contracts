@@ -1,4 +1,4 @@
-// file: contracts/core/AgentSkillStorage.sol
+// file: contracts/skill/core/AgentSkillStorage.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 

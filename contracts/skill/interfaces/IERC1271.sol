@@ -1,4 +1,4 @@
-// file: contracts/interfaces/IERC1271.sol
+// file: contracts/skill/interfaces/IERC1271.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 

@@ -1,4 +1,4 @@
-// file: contracts/libraries/ErrorLibrary.sol
+// file: contracts/skill/libraries/ErrorLibrary.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
