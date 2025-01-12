@@ -1,12 +1,12 @@
 // file: contracts/skill/account/AgentSkillAccount.sol
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
 import "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import "../interfaces/IERC6551Account.sol";
 import "../interfaces/IAgentSkill.sol";
@@ -272,7 +272,7 @@ contract AgentSkillAccount is
      */
     function supportsInterface(
         bytes4 interfaceId
-    ) public view virtual override returns (bool supported) {
+    ) public view virtual override(IERC165, IERC6551Account) returns (bool supported) {
         return
             interfaceId == type(IERC165).interfaceId ||
             interfaceId == type(IERC6551Account).interfaceId ||

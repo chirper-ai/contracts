@@ -1,6 +1,6 @@
 // file: contracts/skill/registry/ERC6551Registry.sol
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
 import "@openzeppelin/contracts/utils/Create2.sol";
 import "../interfaces/IERC6551Registry.sol";
@@ -140,8 +140,8 @@ contract ERC6551Registry is IERC6551Registry {
 
         // Get first 20 bytes of code which contains the implementation address
         assembly {
-            let codeSize := extcodesize(account)
-            if iszero(codesize) {
+            let size := extcodesize(account)
+            if iszero(size) {
                 revert(0, 0)
             }
             extcodecopy(account, 0x20, 0x0E, 20) // Skip first 14 bytes of proxy code
@@ -199,6 +199,24 @@ contract ERC6551Registry is IERC6551Registry {
         }
         if (params.chainId == 0) {
             return (false, "Invalid chain ID");
+        }
+        return (true, "");
+    }
+
+    /**
+     * @notice Checks if an address is a valid implementation
+     * @param implementation The address to check
+     * @return valid Whether the implementation is valid
+     * @return reason If invalid, the reason why
+     */
+    function isValidImplementation(
+        address implementation
+    ) external view returns (bool valid, string memory reason) {
+        if (implementation == address(0)) {
+            return (false, "Zero address not allowed");
+        }
+        if (implementation.code.length == 0) {
+            return (false, "No code at implementation address");
         }
         return (true, "");
     }

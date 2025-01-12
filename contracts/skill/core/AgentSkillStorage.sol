@@ -1,8 +1,7 @@
 // file: contracts/skill/core/AgentSkillStorage.sol
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
-import "@openzeppelin/contracts-upgradeable/utils/CountersUpgradeable.sol";
 import "../interfaces/IERC6551Registry.sol";
 import "../libraries/Constants.sol";
 import "../libraries/ErrorLibrary.sol";
@@ -14,8 +13,6 @@ import "../libraries/ErrorLibrary.sol";
  * @dev Uses storage gaps for upgrade safety following OpenZeppelin pattern
  */
 abstract contract AgentSkillStorage {
-    using CountersUpgradeable for CountersUpgradeable.Counter;
-
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
@@ -38,9 +35,9 @@ abstract contract AgentSkillStorage {
     
     /**
      * @notice Token tracking
-     * @dev Counters and mappings for token management
+     * @dev Counter and mappings for token management
      */
-    CountersUpgradeable.Counter internal _tokenIdCounter;
+    uint256 internal _currentTokenId;
     mapping(uint256 => bool) public tokenExists;
     mapping(uint256 => uint256) public tokenCreationTime;
 

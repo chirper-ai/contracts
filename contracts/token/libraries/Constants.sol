@@ -57,6 +57,18 @@ library Constants {
     /// @notice Graduation liquidity timeout
     uint256 public constant GRADUATION_TIMEOUT = 300; // 5 minutes
 
+    /// @notice Minimum price impact allowed (0.1%)
+    uint256 public constant MIN_PRICE_IMPACT = 10;
+
+    /// @notice Maximum price impact allowed (10%)
+    uint256 public constant MAX_PRICE_IMPACT = 1000;
+
+    /// @notice Price precision for calculations (1e18)
+    uint256 public constant PRICE_PRECISION = 1e18;
+
+    /// @notice Minimum trade size (helps prevent dust manipulation)
+    uint256 public constant MIN_TRADE_SIZE = 1e16; // 0.01 tokens
+
     /*//////////////////////////////////////////////////////////////
                          PROTOCOL SETTINGS
     //////////////////////////////////////////////////////////////*/

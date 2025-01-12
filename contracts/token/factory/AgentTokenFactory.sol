@@ -3,8 +3,8 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
@@ -82,9 +82,9 @@ contract AgentTokenFactory is
         __Pausable_init();
 
         // Set up roles
-        _setupRole(DEFAULT_ADMIN_ROLE, admin);
-        _setupRole(Constants.UPGRADER_ROLE, admin);
-        _setupRole(Constants.PAUSER_ROLE, admin);
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(Constants.UPGRADER_ROLE, admin);
+        _grantRole(Constants.PAUSER_ROLE, admin);
     }
 
     // ------------------------------------------------------------------------

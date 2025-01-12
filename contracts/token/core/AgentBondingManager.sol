@@ -4,8 +4,8 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./AgentToken.sol";
@@ -174,9 +174,9 @@ contract AgentBondingManager is
         address _platform,
         CurveConfig calldata _config
     ) external initializer {
-        require(_baseAsset != address(0), Constants.ERR_ZERO_ADDRESS);
-        require(_registry != address(0), Constants.ERR_ZERO_ADDRESS);
-        require(_platform != address(0), Constants.ERR_ZERO_ADDRESS);
+        ErrorLibrary.validateAddress(_baseAsset, "baseAsset");
+        ErrorLibrary.validateAddress(_registry, "registry");
+        ErrorLibrary.validateAddress(_platform, "platform");
         _validateConfig(_config);
 
         __AccessControl_init();
@@ -224,7 +224,7 @@ contract AgentBondingManager is
      * @param recipient The new fee recipient
      */
     function setFeeRecipient(address recipient) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(recipient != address(0), "Invalid fee recipient");
+        ErrorLibrary.validateAddress(recipient, "recipient");
         feeRecipient = recipient;
         emit FeeRecipientSet(recipient);
     }
@@ -311,7 +311,7 @@ contract AgentBondingManager is
     }
 
     /**
-     * @notice Buy tokens from the bonding curve
+     * @notice Buy tokens from the bonding curve with price impact protection
      * @param token Address of the token to buy
      * @param assetAmount Amount of base asset to spend (includes tax)
      * @return tokenAmount Amount of tokens received
@@ -383,7 +383,7 @@ contract AgentBondingManager is
     }
 
     /**
-     * @notice Sell tokens back to the bonding curve
+     * @notice Sell tokens back to the bonding curve with price impact protection
      * @param token Address of the token to sell
      * @param tokenAmount Amount of tokens to sell
      * @return assetAmount Amount of base asset received
@@ -453,32 +453,40 @@ contract AgentBondingManager is
 
     /**
      * @notice Internal function to graduate a token to DEX trading
-     * @dev Splits liquidity across multiple DEXes based on weights, then burns the resulting LP tokens
+     * @dev Splits liquidity across multiple DEXes based on weights, then burns LP tokens
      * @param token Token to graduate
      */
-    function _graduate(address token) internal {
+    function _graduate(address token) internal nonReentrant {
         CurveData storage curve = curves[token];
         require(!curve.graduated, "Already graduated");
 
+        // STEP 1: Update state FIRST (Checks-Effects-Interactions)
+        curve.graduated = true;
+        
         uint256[] memory amounts = new uint256[](defaultConfig.dexAdapters.length);
         address[] memory pairs = new address[](defaultConfig.dexAdapters.length);
+        curve.dexPairs = pairs;  // Set empty array first
 
-        // Calculate total liquidity
+        // Mark token's own graduation flag early
+        AgentToken(token).graduate();
+
+        // Calculate total liquidity to be distributed
         uint256 totalAssets = curve.assetReserve;
         uint256 totalTokens = curve.tokenReserve;
 
+        // STEP 2: External interactions AFTER state changes
         for (uint256 i = 0; i < defaultConfig.dexAdapters.length; i++) {
             IDEXAdapter adapter = IDEXAdapter(defaultConfig.dexAdapters[i]);
 
-            // Weighted split
+            // Calculate weighted split
             uint256 assetAmount = (totalAssets * defaultConfig.dexWeights[i]) / 100;
             uint256 tokenAmount = (totalTokens * defaultConfig.dexWeights[i]) / 100;
 
-            // Approve tokens
+            // Approve exact amounts instead of unlimited
             IERC20(token).safeIncreaseAllowance(adapter.getRouterAddress(), tokenAmount);
             baseAsset.safeIncreaseAllowance(adapter.getRouterAddress(), assetAmount);
 
-            // Add liquidity to the DEX with 'to: address(this)' so we receive the LP tokens
+            // Add liquidity with strict slippage protection
             (uint256 amountA, uint256 amountB, uint256 liquidity) = adapter.addLiquidity(
                 IDEXAdapter.LiquidityParams({
                     tokenA: token,
@@ -494,24 +502,31 @@ contract AgentBondingManager is
                 })
             );
 
-            // The DEX pair address
+            // Verify minimum amounts were received
+            require(
+                amountA >= (tokenAmount * Constants.MAX_GRADUATION_SLIPPAGE) / Constants.BASIS_POINTS,
+                "Insufficient tokenA received"
+            );
+            require(
+                amountB >= (assetAmount * Constants.MAX_GRADUATION_SLIPPAGE) / Constants.BASIS_POINTS,
+                "Insufficient tokenB received"
+            );
+
+            // Get and store DEX pair address
             address pairAddr = adapter.getPair(token, address(baseAsset));
-
-            // Record data for event
-            amounts[i] = amountB;
             pairs[i] = pairAddr;
+            amounts[i] = amountB;
 
-            // Clear approvals
+            // Clear approvals for safety
             IERC20(token).safeApprove(adapter.getRouterAddress(), 0);
             baseAsset.safeApprove(adapter.getRouterAddress(), 0);
 
-            // ----------------------------------------------------------------
-            // BURN THE LP TOKENS: Transfer from AgentBondingManager to dead address
-            // ----------------------------------------------------------------
+            // Handle LP tokens using SafeERC20
             if (liquidity > 0) {
                 uint256 lpBalance = IERC20(pairAddr).balanceOf(address(this));
                 if (lpBalance > 0) {
-                    IERC20(pairAddr).transfer(
+                    // Use safeTransfer instead of transfer
+                    IERC20(pairAddr).safeTransfer(
                         0x000000000000000000000000000000000000dEaD,
                         lpBalance
                     );
@@ -519,12 +534,8 @@ contract AgentBondingManager is
             }
         }
 
-        // Mark as graduated
-        curve.graduated = true;
+        // Update final array of DEX pairs
         curve.dexPairs = pairs;
-
-        // Mark token's own graduation flag
-        AgentToken(token).graduate();
 
         emit TokenGraduated(token, pairs, amounts);
     }

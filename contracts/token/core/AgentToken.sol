@@ -5,8 +5,8 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "../libraries/ErrorLibrary.sol";
 import "../libraries/Constants.sol";
 
@@ -311,7 +311,7 @@ contract AgentToken is
         address from,
         address to,
         uint256 amount
-    ) internal virtual override whenNotPaused {
+    ) internal override whenNotPaused {
         // Basic checks
         ErrorLibrary.validateAddress(from, "from");
         ErrorLibrary.validateAddress(to, "to");
@@ -328,26 +328,22 @@ contract AgentToken is
         bool isSell = false;
 
         if (!isGraduated) {
-            // BEFORE graduation, rely on bondingContract for buy/sell detection
+            // Pre-graduation: Check against bonding contract
             if (to == bondingContract) {
-                // user -> bondingContract => SELL
                 isSell = true;
             } else if (from == bondingContract) {
-                // bondingContract -> user => BUY
                 isBuy = true;
             }
         } else {
-            // AFTER graduation, rely on dexPairs
+            // Post-graduation: Check against DEX pairs
             if (dexPairs[from]) {
-                // from DEX pair -> user => BUY
                 isBuy = true;
             } else if (dexPairs[to]) {
-                // user -> DEX pair => SELL
                 isSell = true;
             }
         }
 
-        // Decide applicable tax rate
+        // Apply tax if applicable
         uint256 taxRate = 0;
         if (isBuy) {
             taxRate = buyTax;
@@ -356,25 +352,20 @@ contract AgentToken is
         }
 
         if (taxRate > 0) {
-            // Calculate total tax
+            // Calculate taxes
             uint256 totalTax = (amount * taxRate) / Constants.BASIS_POINTS;
-
-            // Split between platform and creator
             uint256 platformTaxAmount = (totalTax * Constants.PLATFORM_FEE_SHARE) /
                 (Constants.PLATFORM_FEE_SHARE + Constants.CREATOR_FEE_SHARE);
             uint256 creatorTaxAmount = totalTax - platformTaxAmount;
-
-            // Net amount to recipient
             uint256 netAmount = amount - totalTax;
 
-            // Transfer taxes to respective vaults
+            // Execute transfers
             _transferTokens(from, taxVault, platformTaxAmount);
             _transferTokens(from, creatorVault, creatorTaxAmount);
             _transferTokens(from, to, netAmount);
 
             emit TaxCollected(from, to, platformTaxAmount, creatorTaxAmount, isBuy);
         } else {
-            // No tax
             _transferTokens(from, to, amount);
         }
     }
@@ -391,8 +382,8 @@ contract AgentToken is
         address to,
         uint256 amount
     ) internal virtual {
-        try super._transfer(from, to, amount) {
-            // success
+        try ERC20BurnableUpgradeable._transfer(from, to, amount) {
+            // Success case - do nothing
         } catch {
             revert ErrorLibrary.TokenTransferFailed(address(this), from, to);
         }
