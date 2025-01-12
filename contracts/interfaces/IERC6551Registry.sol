@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 
 /**
  * @title IERC6551Registry
- * @author Your Name
+ * @author ChirperAI
  * @notice Interface for the ERC6551 account registry
  * @dev Defines the registry functionality for creating and tracking token bound accounts
  */

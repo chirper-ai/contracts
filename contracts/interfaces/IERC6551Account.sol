@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 
 /**
  * @title IERC6551Account
- * @author Your Name
+ * @author ChirperAI
  * @notice Interface for ERC6551 token bound accounts
  * @dev Specification for accounts bound to non-fungible tokens (NFTs)
  */

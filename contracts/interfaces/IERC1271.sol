@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 
 /**
  * @title IERC1271
- * @author Your Name
+ * @author ChirperAI
  * @notice Interface for contracts to validate signatures
  * @dev Implements EIP-1271 standard for contract signature validation
  */

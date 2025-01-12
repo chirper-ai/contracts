@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 
 /**
  * @title ErrorLibrary
- * @author Your Name 
+ * @author ChirperAI
  * @notice Central library for all custom errors in the protocol
  * @dev Contains all error definitions used across the AgentSkill system
  */

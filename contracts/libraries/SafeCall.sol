@@ -6,7 +6,7 @@ import "./ErrorLibrary.sol";
 
 /**
  * @title SafeCall
- * @author Your Name
+ * @author ChirperAI
  * @notice Library for safe external contract interactions
  * @dev Provides utilities to safely make external calls and handle their results
  */

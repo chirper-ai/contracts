@@ -22,7 +22,7 @@ import "../libraries/SafeCall.sol";
 
 /**
  * @title AgentSkillCore
- * @author Your Name
+ * @author ChirperAI
  * @notice Main implementation of the Agent Skill NFT system with bound accounts
  * @dev Implements NFT functionality, ERC6551 account binding, and fee management
  */

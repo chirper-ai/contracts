@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 
 /**
  * @title IAgentSkillErrors
- * @author Your Name
+ * @author ChirperAI
  * @notice Defines all custom errors used throughout the AgentSkill protocol
  * @dev Centralizes error definitions to ensure consistency and avoid duplication
  */

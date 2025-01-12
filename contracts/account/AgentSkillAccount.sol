@@ -16,7 +16,7 @@ import "../libraries/SafeCall.sol";
 
 /**
  * @title AgentSkillAccount
- * @author Your Name
+ * @author ChirperAI
  * @notice Token bound account implementation for Agent Skills with enhanced security
  * @dev Implements ERC6551Account with additional safety features and reentry protection
  */

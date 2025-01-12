@@ -9,7 +9,7 @@ import "../libraries/ErrorLibrary.sol";
 
 /**
  * @title AgentSkillStorage
- * @author Your Name
+ * @author ChirperAI
  * @notice Storage layout for the AgentSkill system
  * @dev Uses storage gaps for upgrade safety following OpenZeppelin pattern
  */

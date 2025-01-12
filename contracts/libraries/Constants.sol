@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 
 /**
 * @title Constants
-* @author Your Name
+* @author ChirperAI
 * @notice Central library for protocol constants and configuration values
 * @dev Contains all immutable values used throughout the AgentSkill system
 */

@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 
 /**
  * @title IAgentSkillEvents
- * @author Your Name
+ * @author ChirperAI
  * @notice Defines all events emitted throughout the AgentSkill protocol
  * @dev Centralizes event definitions to ensure consistency across the protocol
  */

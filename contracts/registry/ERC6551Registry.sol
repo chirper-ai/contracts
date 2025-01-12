@@ -9,7 +9,7 @@ import "../libraries/Constants.sol";
 
 /**
  * @title ERC6551Registry
- * @author Your Name
+ * @author ChirperAI
  * @notice Registry for creating and tracking token bound accounts
  * @dev Implementation of ERC6551 registry specification with enhanced security
  */

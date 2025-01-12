@@ -11,7 +11,7 @@ import "../libraries/ErrorLibrary.sol";
 
 /**
  * @title AgentSkillFactory
- * @author Your Name
+ * @author ChirperAI
  * @notice Factory contract for deploying the complete Agent Skill system
  * @dev Handles deployment and initialization of all required contracts
  */

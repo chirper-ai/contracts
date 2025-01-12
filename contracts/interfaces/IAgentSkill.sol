@@ -7,7 +7,7 @@ import "./IAgentSkillEvents.sol";
 
 /**
  * @title IAgentSkill
- * @author Your Name
+ * @author ChirperAI
  * @notice Core interface for the AgentSkill NFT system
  * @dev Defines the complete external API for the AgentSkill protocol
  */
