@@ -299,27 +299,26 @@ contract AgentToken is
     // ------------------------------------------------------------------------
 
     /**
-     * @notice Overridden transfer function to handle taxes for both
-     *         bonding-curve trades (pre-graduation) and DEX trades (post-graduation).
-     *
-     * @dev Logic summary:
-     *  1. If `isGraduated == false`, treat `from == bondingContract` as SELL, `to == bondingContract` as BUY.
-     *  2. If `isGraduated == true`, treat `from` in `dexPairs` as BUY, `to` in `dexPairs` as SELL.
-     *  3. Addresses in `isExcludedFromTax` bypass all tax calculations.
+     * @dev Overrides the _update function to implement tax collection on transfers.
+     * This handles both regular transfers and minting/burning operations.
+     * @param from The address tokens are being transferred from
+     * @param to The address tokens are being transferred to
+     * @param value The amount of tokens being transferred
      */
-    function _transfer(
+    function _update(
         address from,
         address to,
-        uint256 amount
-    ) internal override whenNotPaused {
-        // Basic checks
-        ErrorLibrary.validateAddress(from, "from");
-        ErrorLibrary.validateAddress(to, "to");
-        ErrorLibrary.validateAmount(amount, "amount");
+        uint256 value
+    ) internal virtual override {
+        // Skip tax logic for minting/burning operations
+        if (from == address(0) || to == address(0)) {
+            super._update(from, to, value);
+            return;
+        }
 
-        // If either party is excluded from tax, no tax is taken
+        // If either party is excluded from tax, process normally
         if (isExcludedFromTax[from] || isExcludedFromTax[to]) {
-            _transferTokens(from, to, amount);
+            super._update(from, to, value);
             return;
         }
 
@@ -343,49 +342,28 @@ contract AgentToken is
             }
         }
 
-        // Apply tax if applicable
-        uint256 taxRate = 0;
-        if (isBuy) {
-            taxRate = buyTax;
-        } else if (isSell) {
-            taxRate = sellTax;
-        }
+        uint256 taxRate = isBuy ? buyTax : (isSell ? sellTax : 0);
 
         if (taxRate > 0) {
-            // Calculate taxes
-            uint256 totalTax = (amount * taxRate) / Constants.BASIS_POINTS;
-            uint256 platformTaxAmount = (totalTax * Constants.PLATFORM_FEE_SHARE) /
-                (Constants.PLATFORM_FEE_SHARE + Constants.CREATOR_FEE_SHARE);
-            uint256 creatorTaxAmount = totalTax - platformTaxAmount;
-            uint256 netAmount = amount - totalTax;
+            uint256 totalTax = (value * taxRate) / Constants.BASIS_POINTS;
+            if (totalTax > 0) {
+                uint256 platformTaxAmount = (totalTax * Constants.PLATFORM_FEE_SHARE) /
+                    (Constants.PLATFORM_FEE_SHARE + Constants.CREATOR_FEE_SHARE);
+                uint256 creatorTaxAmount = totalTax - platformTaxAmount;
+                uint256 netAmount = value - totalTax;
 
-            // Execute transfers
-            _transferTokens(from, taxVault, platformTaxAmount);
-            _transferTokens(from, creatorVault, creatorTaxAmount);
-            _transferTokens(from, to, netAmount);
+                // Process tax transfers first
+                super._update(from, taxVault, platformTaxAmount);
+                super._update(from, creatorVault, creatorTaxAmount);
+                
+                // Then process main transfer with remaining amount
+                super._update(from, to, netAmount);
 
-            emit TaxCollected(from, to, platformTaxAmount, creatorTaxAmount, isBuy);
+                emit TaxCollected(from, to, platformTaxAmount, creatorTaxAmount, isBuy);
+            }
         } else {
-            _transferTokens(from, to, amount);
-        }
-    }
-
-    /**
-     * @notice Internal helper for safe token transfers
-     * @dev Wraps the base ERC20 transfer in a try/catch for error handling
-     * @param from Address sending tokens
-     * @param to Address receiving tokens
-     * @param amount Amount of tokens to transfer
-     */
-    function _transferTokens(
-        address from,
-        address to,
-        uint256 amount
-    ) internal virtual {
-        try ERC20BurnableUpgradeable._transfer(from, to, amount) {
-            // Success case - do nothing
-        } catch {
-            revert ErrorLibrary.TokenTransferFailed(address(this), from, to);
+            // No tax applicable, process normally
+            super._update(from, to, value);
         }
     }
 

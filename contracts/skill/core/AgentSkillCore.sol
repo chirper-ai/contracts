@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC721/ERC721Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/common/ERC2981Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
@@ -112,8 +113,7 @@ contract AgentSkillCore is
             config.inferencePrice > Constants.MAX_INFERENCE_PRICE) {
             revert ErrorLibrary.InvalidAmount(
                 config.inferencePrice, 
-                "inferencePrice", 
-                Constants.ERR_INVALID_PRICE
+                "inferencePrice"
             );
         }
 
@@ -193,7 +193,7 @@ contract AgentSkillCore is
     ) external override whenNotPaused nonReentrant tokenMustExist(tokenId) {
         // Validate caller and state
         if (msg.sender != ownerOf(tokenId)) {
-            revert ErrorLibrary.NotAuthorized(msg.sender, tokenId, 0);
+            revert ErrorLibrary.TokenUnauthorized(msg.sender, tokenId);
         }
         if (!burnEnabled) {
             revert ErrorLibrary.TokenBurningDisabled(tokenId);
@@ -223,11 +223,17 @@ contract AgentSkillCore is
             // Transfer native token balance
             uint256 nativeBalance = account.balance;
             if (nativeBalance > 0) {
-                IERC6551Account(account).executeCall(
-                    recipient,
-                    nativeBalance,
-                    new bytes(0)
-                );
+                // Get current account nonce from state
+                (uint256 currentNonce,, ) = IERC6551Account(account).state();
+                IERC6551Account.ExecutionParams memory params = IERC6551Account.ExecutionParams({
+                    to: recipient,
+                    value: nativeBalance,
+                    data: new bytes(0),
+                    operation: 0, // regular call
+                    nonce: currentNonce,
+                    deadline: block.timestamp + 3600 // 1 hour deadline
+                });
+                IERC6551Account(account).executeCall(params);
             }
 
             // Distribute any pending inference fees
@@ -269,7 +275,7 @@ contract AgentSkillCore is
     ) {
         // Validate caller authorization
         if (msg.sender != permanentAgent[tokenId] && msg.sender != ownerOf(tokenId)) {
-            revert ErrorLibrary.NotAuthorized(msg.sender, tokenId, 0);
+            revert ErrorLibrary.TokenUnauthorized(msg.sender, tokenId);
         }
         ErrorLibrary.validateAddress(target, "target");
 
@@ -292,12 +298,51 @@ contract AgentSkillCore is
             IERC20(token).safeTransferFrom(msg.sender, account, amount);
         }
 
-        // Execute call through bound account
-        try IERC6551Account(account).executeCall(
-            target,
-            remainingAmount,
-            data
-        ) returns (bool _success, bytes memory _result) {
+        // Get current account nonce from state
+        (uint256 currentNonce,, ) = IERC6551Account(account).state();
+
+        // For ERC20 tokens, we need to approve the target contract
+        bytes memory callData;
+        if (token != Constants.ETH_ADDRESS) {
+            callData = abi.encodeWithSelector(
+                IERC20.approve.selector,
+                target,
+                remainingAmount
+            );
+            
+            // First approve the target contract
+            IERC6551Account.ExecutionParams memory approveParams = IERC6551Account.ExecutionParams({
+                to: token,
+                value: 0,
+                data: callData,
+                operation: 0,
+                nonce: currentNonce,
+                deadline: block.timestamp + 3600
+            });
+            
+            (bool approveSuccess, bytes memory approveResult) = IERC6551Account(account).executeCall(approveParams);
+            if (!approveSuccess) {
+                revert ErrorLibrary.OperationFailed(
+                    "approve",
+                    approveResult.length > 0 ? string(approveResult) : "Approval failed"
+                );
+            }
+            
+            // Increment nonce for next call
+            currentNonce++;
+        }
+
+        // Execute the main call
+        IERC6551Account.ExecutionParams memory params = IERC6551Account.ExecutionParams({
+            to: target,
+            value: token == Constants.ETH_ADDRESS ? remainingAmount : 0,
+            data: data,
+            operation: 0,
+            nonce: currentNonce,
+            deadline: block.timestamp + 3600
+        });
+
+        try IERC6551Account(account).executeCall(params) returns (bool _success, bytes memory _result) {
             success = _success;
             result = _result;
         } catch Error(string memory reason) {
@@ -315,8 +360,6 @@ contract AgentSkillCore is
             fee,
             success
         );
-
-        return (success, result);
     }
 
     /**
@@ -486,13 +529,16 @@ contract AgentSkillCore is
         // Verify owner signature
         address owner = ownerOf(config.tokenId);
         if (!_verifySignature(messageHash, config.ownerSignature, owner)) {
-            revert ErrorLibrary.InvalidSignature(owner, messageHash, config.ownerSignature);
+            revert ErrorLibrary.SignatureInvalid(owner, messageHash);
         }
 
         // Verify platform signature
         if (!_verifySignature(messageHash, config.platformSignature, platformSigner)) {
-            revert ErrorLibrary.InvalidSignature(platformSigner, messageHash, config.platformSignature);
+            revert ErrorLibrary.SignatureInvalid(platformSigner, messageHash);
         }
+
+        // Get initial nonce
+        (uint256 currentNonce,, ) = IERC6551Account(account).state();
 
         // Process withdrawals
         uint256[] memory _amounts = new uint256[](config.tokens.length);
@@ -502,11 +548,16 @@ contract AgentSkillCore is
                 // Native token withdrawal
                 uint256 balance = account.balance;
                 if (balance > 0) {
-                    (bool success, bytes memory result) = IERC6551Account(account).executeCall(
-                        config.recipient,
-                        balance,
-                        new bytes(0)
-                    );
+                    IERC6551Account.ExecutionParams memory params = IERC6551Account.ExecutionParams({
+                        to: config.recipient,
+                        value: balance,
+                        data: new bytes(0),
+                        operation: 0,
+                        nonce: currentNonce + i, // Increment nonce for each operation
+                        deadline: config.deadline
+                    });
+
+                    (bool success, bytes memory result) = IERC6551Account(account).executeCall(params);
                     if (!success) {
                         revert ErrorLibrary.OperationFailed(
                             "withdraw ETH",
@@ -524,11 +575,17 @@ contract AgentSkillCore is
                         config.recipient,
                         balance
                     );
-                    (bool success, bytes memory result) = IERC6551Account(account).executeCall(
-                        token,
-                        0,
-                        transferData
-                    );
+
+                    IERC6551Account.ExecutionParams memory params = IERC6551Account.ExecutionParams({
+                        to: token,
+                        value: 0,
+                        data: transferData,
+                        operation: 0,
+                        nonce: currentNonce + i, // Increment nonce for each operation
+                        deadline: config.deadline
+                    });
+
+                    (bool success, bytes memory result) = IERC6551Account(account).executeCall(params);
                     if (!success) {
                         revert ErrorLibrary.OperationFailed(
                             "withdraw ERC20",
@@ -546,7 +603,7 @@ contract AgentSkillCore is
             config.recipient,
             config.tokens,
             _amounts,
-            "Emergency withdrawal requested"
+            "Emergency withdrawal completed"
         );
 
         return _amounts;
@@ -564,14 +621,23 @@ contract AgentSkillCore is
     function _createAccount(
         uint256 tokenId
     ) internal returns (address account) {
-        try accountRegistry.createAccount(
-            accountImplementation,
-            block.chainid,
-            address(this),
-            tokenId,
-            0, // salt
-            "" // no init data
-        ) returns (address _account) {
+        // Create the creation params struct
+        IERC6551Registry.AccountCreationParams memory creationParams = IERC6551Registry.AccountCreationParams({
+            implementation: accountImplementation,
+            chainId: block.chainid,
+            tokenContract: address(this),
+            tokenId: tokenId,
+            salt: 0
+        });
+
+        // Create the initialization params struct
+        IERC6551Registry.InitializationParams memory initParams = IERC6551Registry.InitializationParams({
+            initData: new bytes(0),  // no initialization data
+            nonce: 0,               // initial nonce
+            deadline: block.timestamp + 3600  // 1 hour deadline
+        });
+
+        try accountRegistry.createAccount(creationParams, initParams) returns (address _account) {
             if (_account == address(0)) {
                 revert ErrorLibrary.AccountCreationFailed(
                     accountImplementation,
@@ -586,14 +652,14 @@ contract AgentSkillCore is
                 tokenId,
                 _account,
                 accountImplementation,
-                0
+                0 // salt
             );
 
             return _account;
         } catch Error(string memory reason) {
             revert ErrorLibrary.AccountCreationFailed(
                 accountImplementation,
-                reason
+                bytes(reason)
             );
         } catch {
             revert ErrorLibrary.AccountCreationFailed(
@@ -621,15 +687,16 @@ contract AgentSkillCore is
         uint256 creatorShare = (amount * Constants.CREATOR_INFERENCE_SHARE) / 100;
         uint256 platformShare = amount - creatorShare;
 
-        // Transfer shares
-        bool success1 = SafeCall.safeTransferETH(creator, creatorShare);
-        bool success2 = SafeCall.safeTransferETH(platformSigner, platformShare);
+        // Transfer creator share
+        (bool success1, ) = payable(creator).call{value: creatorShare}("");
+        if (!success1) {
+            revert ErrorLibrary.TokenTransferFailed(tokenId, address(this), creator);
+        }
 
-        if (!success1 || !success2) {
-            revert ErrorLibrary.FeeTransferFailed(
-                !success1 ? creator : platformSigner,
-                !success1 ? creatorShare : platformShare
-            );
+        // Transfer platform share
+        (bool success2, ) = payable(platformSigner).call{value: platformShare}("");
+        if (!success2) {
+            revert ErrorLibrary.TokenTransferFailed(tokenId, address(this), platformSigner);
         }
 
         emit InferenceFeesDistributed(
@@ -652,10 +719,9 @@ contract AgentSkillCore is
         bytes calldata signature
     ) internal view {
         if (!_verifySignature(hash, signature, platformSigner)) {
-            revert ErrorLibrary.InvalidSignature(
+            revert ErrorLibrary.SignatureInvalid(
                 platformSigner,
-                hash,
-                signature
+                hash
             );
         }
     }
@@ -672,8 +738,8 @@ contract AgentSkillCore is
         bytes calldata signature,
         address expectedSigner
     ) internal pure returns (bool valid) {
-        bytes32 ethSignedHash = hash.toEthSignedMessageHash();
-        address recoveredSigner = ethSignedHash.recover(signature);
+        bytes32 ethSignedHash = MessageHashUtils.toEthSignedMessageHash(hash);
+        address recoveredSigner = ECDSA.recover(ethSignedHash, signature);
         return recoveredSigner == expectedSigner;
     }
 
@@ -752,7 +818,7 @@ contract AgentSkillCore is
         address newImplementation
     ) internal override onlyRole(Constants.UPGRADER_ROLE) {
         if (block.timestamp < lastUpgradeTimestamp + Constants.MIN_OPERATION_DELAY) {
-            revert ErrorLibrary.InvalidOperation("Upgrade delay not met");
+            revert ErrorLibrary.InvalidOperation("authorizeUpgrade", "Upgrade delay not met");
         }
         lastUpgradeTimestamp = block.timestamp;
     }

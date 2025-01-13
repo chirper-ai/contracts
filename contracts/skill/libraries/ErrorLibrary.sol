@@ -21,6 +21,7 @@ library ErrorLibrary {
     error RoleRevokeFailed(address account, bytes32 role);
     error MissingRole(address account, bytes32 role);
     error InvalidRoleAdmin(address caller, bytes32 role);
+    error TokenUnauthorized(address caller, uint256 tokenId);
 
     /**
      * @notice Token management errors
@@ -60,6 +61,7 @@ library ErrorLibrary {
     error SignatureReplay(uint256 nonce);
     error InvalidSigner(address signer, string reason);
     error DeadlinePassed(uint256 deadline, uint256 timestamp);
+    error InvalidNonce(uint256 provided, uint256 current);
 
     /**
      * @notice Parameter validation errors
@@ -83,8 +85,8 @@ library ErrorLibrary {
     /**
      * @notice Operation errors
      */
+    error InvalidOperation(string name, string reason);
     error OperationFailed(string operation, string reason);
-    error InvalidOperation(string operation);
     error OperationNotAllowed(string operation, string reason);
     error ReentrantCall(string operation);
 
@@ -98,6 +100,7 @@ library ErrorLibrary {
     error InferenceRequestFailed(uint256 tokenId, string reason);
     error InvalidInferenceRequest(uint256 requestId);
     error InferenceTimeout(uint256 requestId, uint256 deadline);
+    error InvalidDeadline(uint256 deadline, uint256 timestamp);
     error InvalidInferenceResult(uint256 requestId, string reason);
     error InferencePriceMismatch(uint256 expected, uint256 provided);
 
@@ -136,7 +139,7 @@ library ErrorLibrary {
      */
     function validateAddress(address addr, string memory param) internal pure {
         if (addr == address(0)) {
-            revert InvalidAddress(addr, param);
+            revert InvalidOperation("validate address", string.concat("Invalid ", param, " address"));
         }
     }
 
@@ -167,8 +170,8 @@ library ErrorLibrary {
      * @param deadline Deadline to validate
      */
     function validateDeadline(uint256 deadline) internal view {
-        if (block.timestamp > deadline) {
-            revert DeadlinePassed(deadline, block.timestamp);
+        if (deadline < block.timestamp && deadline != 0) {
+            revert InvalidDeadline(deadline, block.timestamp);
         }
     }
 

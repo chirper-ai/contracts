@@ -1,4 +1,3 @@
-// file: contracts/token/core/UniswapAdapter.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
@@ -14,13 +13,26 @@ import "../libraries/Constants.sol";
  * @title UniswapAdapter
  * @author ChirperAI
  * @notice Adapter implementation for Uniswap V2 and compatible DEX protocols
- * @dev Implements IDEXAdapter interface with Uniswap V2 specific logic
- * - Handles liquidity addition for token graduation
- * - Manages router and factory interactions
- * - Implements safety checks and deadline handling
+ * @dev This contract serves as an adapter between the bonding curve system and Uniswap V2-compatible DEXes.
+ * It implements the IDEXAdapter interface and handles:
+ * - Safe liquidity addition with slippage protection
+ * - Token approvals using SafeERC20
+ * - Router and factory interactions
+ * - Comprehensive error handling and validation
+ *
+ * Key features:
+ * - Immutable router and factory addresses for security
+ * - SafeERC20 integration for safe token operations
+ * - Precise approval management to minimize attack surface
+ * - Comprehensive parameter validation
+ * - Slippage protection for liquidity operations
  */
 contract UniswapAdapter is IDEXAdapter {
     using SafeERC20 for IERC20;
+
+    /*//////////////////////////////////////////////////////////////
+                               STORAGE
+    //////////////////////////////////////////////////////////////*/
 
     /// @notice Immutable Uniswap V2 Router address
     /// @dev Set during construction and cannot be changed
@@ -30,26 +42,46 @@ contract UniswapAdapter is IDEXAdapter {
     /// @dev Retrieved from router during construction
     address public immutable factory;
 
+    /*//////////////////////////////////////////////////////////////
+                              CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
+
     /**
      * @notice Creates new Uniswap adapter instance
-     * @dev Validates router and retrieves factory
+     * @dev Validates router address and retrieves factory address
      * @param router_ Address of Uniswap V2 Router contract
      */
     constructor(address router_) {
-        // Validate router address
         ErrorLibrary.validateAddress(router_, "router");
         router = router_;
 
-        // Get and validate factory address
         address factoryAddr = IUniswapV2Router02(router_).factory();
         ErrorLibrary.validateAddress(factoryAddr, "factory");
         factory = factoryAddr;
     }
 
+    /*//////////////////////////////////////////////////////////////
+                         LIQUIDITY MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+
     /**
-     * @notice Adds liquidity to Uniswap pair
-     * @dev Handles token approvals and liquidity addition with safety checks
-     * @param params Liquidity parameters including amounts and deadlines
+     * @notice Adds liquidity to Uniswap pair with comprehensive safety checks
+     * @dev This function:
+     * 1. Validates all input parameters
+     * 2. Checks minimum amounts against maximum allowed slippage
+     * 3. Safely manages token approvals
+     * 4. Adds liquidity through the router
+     * 5. Cleans up approvals afterward
+     * 6. Validates returned amounts
+     *
+     * Safety measures:
+     * - Uses SafeERC20 for all token operations
+     * - Precise approval management
+     * - Comprehensive error handling
+     * - Slippage protection
+     * - Deadline enforcement
+     *
+     * @param params Struct containing all liquidity addition parameters
      * @return amountA Amount of tokenA actually used
      * @return amountB Amount of tokenB actually used
      * @return liquidity Amount of LP tokens minted
@@ -57,7 +89,7 @@ contract UniswapAdapter is IDEXAdapter {
     function addLiquidity(
         LiquidityParams calldata params
     ) external returns (uint256 amountA, uint256 amountB, uint256 liquidity) {
-        // Validate parameters
+        // STEP 1: Validate all input parameters
         ErrorLibrary.validateAddress(params.tokenA, "tokenA");
         ErrorLibrary.validateAddress(params.tokenB, "tokenB");
         ErrorLibrary.validateAddress(params.to, "to");
@@ -65,23 +97,20 @@ contract UniswapAdapter is IDEXAdapter {
         ErrorLibrary.validateAmount(params.amountB, "amountB");
         ErrorLibrary.validateDeadline(params.deadline);
 
-        // Validate minimum amounts against slippage tolerance
-        if (params.minAmountA < (params.amountA * Constants.MIN_GRADUATION_SLIPPAGE) / Constants.BASIS_POINTS) {
+        // STEP 2: Validate minimum amounts against maximum allowed slippage
+        // Ensures the specified minimum amounts don't allow for excessive slippage
+        if (params.minAmountA < (params.amountA * Constants.MAX_GRADUATION_SLIPPAGE) / Constants.BASIS_POINTS) {
             revert ErrorLibrary.InvalidAmount(params.minAmountA, "minAmountA too low");
         }
-        if (params.minAmountB < (params.amountB * Constants.MIN_GRADUATION_SLIPPAGE) / Constants.BASIS_POINTS) {
+        if (params.minAmountB < (params.amountB * Constants.MAX_GRADUATION_SLIPPAGE) / Constants.BASIS_POINTS) {
             revert ErrorLibrary.InvalidAmount(params.minAmountB, "minAmountB too low");
         }
 
-        // Handle token approvals with safety checks
-        try IERC20(params.tokenA).forceApprove(router, params.amountA) {} catch {
-            revert ErrorLibrary.TokenTransferFailed(params.tokenA, address(this), router);
-        }
-        try IERC20(params.tokenB).forceApprove(router, params.amountB) {} catch {
-            revert ErrorLibrary.TokenTransferFailed(params.tokenB, address(this), router);
-        }
+        // STEP 3: Approve exact amounts needed for the operation
+        IERC20(params.tokenA).safeIncreaseAllowance(router, params.amountA);
+        IERC20(params.tokenB).safeIncreaseAllowance(router, params.amountB);
 
-        // Add liquidity through router with full error handling
+        // STEP 4: Add liquidity through router with full error handling
         try IUniswapV2Router02(router).addLiquidity(
             params.tokenA,
             params.tokenB,
@@ -92,26 +121,29 @@ contract UniswapAdapter is IDEXAdapter {
             params.to,
             params.deadline
         ) returns (uint256 _amountA, uint256 _amountB, uint256 _liquidity) {
-            // Store return values
             amountA = _amountA;
             amountB = _amountB;
             liquidity = _liquidity;
         } catch {
+            // If operation fails, reset approvals before reverting
+            IERC20(params.tokenA).safeDecreaseAllowance(router, params.amountA);
+            IERC20(params.tokenB).safeDecreaseAllowance(router, params.amountB);
             revert ErrorLibrary.DexOperationFailed(
                 "addLiquidity",
                 "Router operation failed"
             );
         }
 
-        // Clear approvals for safety
-        try IERC20(params.tokenA).forceApprove(router, 0) {} catch {
-            revert ErrorLibrary.TokenTransferFailed(params.tokenA, address(this), router);
+        // STEP 5: Clean up any remaining approvals
+        // Only decrease by the unused amount to save gas
+        if (params.amountA > amountA) {
+            IERC20(params.tokenA).safeDecreaseAllowance(router, params.amountA - amountA);
         }
-        try IERC20(params.tokenB).forceApprove(router, 0) {} catch {
-            revert ErrorLibrary.TokenTransferFailed(params.tokenB, address(this), router);
+        if (params.amountB > amountB) {
+            IERC20(params.tokenB).safeDecreaseAllowance(router, params.amountB - amountB);
         }
 
-        // Validate returned amounts against minimums
+        // STEP 6: Final validation of received amounts
         if (amountA < params.minAmountA) {
             revert ErrorLibrary.ExcessiveSlippage(params.minAmountA, amountA);
         }
@@ -120,9 +152,14 @@ contract UniswapAdapter is IDEXAdapter {
         }
     }
 
+    /*//////////////////////////////////////////////////////////////
+                            VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
     /**
      * @notice Returns identifier for this DEX implementation
-     * @return String identifier for the DEX
+     * @dev Used for logging and identification purposes
+     * @return Name of the DEX implementation
      */
     function getDEXName() external pure returns (string memory) {
         return "UniswapV2";
@@ -130,6 +167,7 @@ contract UniswapAdapter is IDEXAdapter {
 
     /**
      * @notice Gets the router contract address
+     * @dev Returns the immutable router address set during construction
      * @return Address of UniswapV2Router02 contract
      */
     function getRouterAddress() external view returns (address) {
@@ -138,6 +176,7 @@ contract UniswapAdapter is IDEXAdapter {
 
     /**
      * @notice Gets the factory contract address
+     * @dev Returns the immutable factory address set during construction
      * @return Address of UniswapV2Factory contract
      */
     function getFactoryAddress() external view returns (address) {
@@ -146,23 +185,20 @@ contract UniswapAdapter is IDEXAdapter {
 
     /**
      * @notice Gets pair address for token combination
-     * @dev Queries factory for existing pair
+     * @dev Queries factory for existing pair with validation
      * @param tokenA First token address
      * @param tokenB Second token address
-     * @return Address of pair contract
+     * @return Address of the Uniswap V2 pair contract
      */
     function getPair(
         address tokenA,
         address tokenB
     ) external view returns (address) {
-        // Validate input addresses
         ErrorLibrary.validateAddress(tokenA, "tokenA");
         ErrorLibrary.validateAddress(tokenB, "tokenB");
         
-        // Get pair from factory
         address pair = IUniswapV2Factory(factory).getPair(tokenA, tokenB);
         
-        // Validate pair exists
         if (pair == address(0)) {
             revert ErrorLibrary.InvalidOperation("getPair: Pair does not exist");
         }

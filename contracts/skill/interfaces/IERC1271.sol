@@ -26,17 +26,6 @@ interface IERC1271 {
     }
 
     /**
-     * @notice Magic value bytes4(keccak256("isValidSignature(bytes32,bytes)"))
-     * @dev Must be returned by isValidSignature when validation passes
-     */
-    bytes4 constant internal MAGIC_VALUE = 0x1626ba7e;
-
-    /**
-     * @notice Magic value returned when a signature is invalid
-     */
-    bytes4 constant internal INVALID_SIGNATURE = 0xffffffff;
-
-    /**
      * @notice Emitted when a signature validation is performed
      * @param hash The hash that was validated
      * @param signer The address that was recovered from the signature

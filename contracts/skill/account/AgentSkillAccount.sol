@@ -58,7 +58,7 @@ contract AgentSkillAccount is
      */
     modifier onlyAuthorized() {
         if (!isValidSigner(msg.sender)) {
-            revert ErrorLibrary.NotAuthorized(msg.sender, tokenId, 0);
+            revert ErrorLibrary.TokenUnauthorized(msg.sender, tokenId);
         }
         _;
     }

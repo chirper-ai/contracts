@@ -518,8 +518,8 @@ contract AgentBondingManager is
             amounts[i] = amountB;
 
             // Clear approvals for safety
-            IERC20(token).safeApprove(adapter.getRouterAddress(), 0);
-            baseAsset.safeApprove(adapter.getRouterAddress(), 0);
+            IERC20(token).safeDecreaseAllowance(adapter.getRouterAddress(), tokenAmount);
+            baseAsset.safeDecreaseAllowance(adapter.getRouterAddress(), assetAmount);
 
             // Handle LP tokens using SafeERC20
             if (liquidity > 0) {

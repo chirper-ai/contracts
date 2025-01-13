@@ -1,5 +1,4 @@
-// test/token/fixtures.js
-const { ethers } = require("hardhat");
+const { ethers, upgrades } = require("hardhat");
 
 async function deployTokenFixture() {
   // Get signers
@@ -8,21 +7,21 @@ async function deployTokenFixture() {
   // Deploy mock USDC
   const MockUSDC = await ethers.getContractFactory("MockERC20");
   const usdc = await MockUSDC.deploy("USD Coin", "USDC", 6);
-  await usdc.deployed();
+  // Remove await usdc.deployed();
 
   // Deploy UniswapV2Adapter
-  const UniswapV2Adapter = await ethers.getContractFactory("UniswapV2Adapter");
+  const UniswapV2Adapter = await ethers.getContractFactory("UniswapAdapter");
   const uniswapAdapter = await UniswapV2Adapter.deploy(
     "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D" // We can use mainnet address in tests
   );
-  await uniswapAdapter.deployed();
+  // Remove await uniswapAdapter.deployed();
 
   // Deploy AgentTokenFactory with proxy
   const AgentTokenFactory = await ethers.getContractFactory("AgentTokenFactory");
   const factory = await upgrades.deployProxy(AgentTokenFactory, [deployer.address], {
     initializer: 'initialize',
   });
-  await factory.deployed();
+  // Remove await factory.deployed();
 
   // Default curve config
   const defaultConfig = {

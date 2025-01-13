@@ -137,7 +137,8 @@ contract AgentSkillFactory {
 
         // Transfer admin roles if specified
         if (config.admin != address(0)) {
-            AgentSkillCore core = AgentSkillCore(address(proxy));
+            // Use payable cast for type conversion
+            AgentSkillCore core = AgentSkillCore(payable(address(proxy)));
             core.grantRole(Constants.UPGRADER_ROLE, config.admin);
             core.grantRole(Constants.TAX_MANAGER_ROLE, config.admin);
             core.grantRole(Constants.PAUSER_ROLE, config.admin);

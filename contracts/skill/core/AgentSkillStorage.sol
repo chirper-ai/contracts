@@ -133,7 +133,7 @@ abstract contract AgentSkillStorage {
      */
     modifier validPrice(uint256 price) {
         if (price > Constants.MAX_MINT_PRICE) {
-            revert ErrorLibrary.InvalidAmount(price, "price", Constants.ERR_INVALID_PRICE);
+            revert ErrorLibrary.InvalidAmount(price, "price");
         }
         _;
     }

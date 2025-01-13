@@ -17,7 +17,8 @@ module.exports = {
         runs: 200
       },
       // Required for OpenZeppelin 5.0
-      evmVersion: "paris"
+      evmVersion: "paris",
+      viaIR: true,
     }
   },
 
