@@ -59,10 +59,10 @@ async function deployTokenFixture() {
     baseAsset: await baseAsset.getAddress(),
     registry: deployer.address,
     managerPlatform: deployer.address,
-    initialAssetRate: ethers.parseUnits("1000", 18),
+    initialAssetRate: ethers.parseUnits("1", 18),
     initialBuyAmount: initialBuyAmount,
     curveConfig: {
-      gradThreshold: ethers.parseUnits("100000", 18), // 100k BASE for graduation
+      gradThreshold: ethers.parseUnits("1000000", 18), // 1M BASE for graduation
       dexAdapters: [await uniswapAdapter.getAddress()],
       dexWeights: [100], // 100%
     },
@@ -84,6 +84,7 @@ async function deployTokenFixture() {
   console.log("Factory:", await factory.getAddress());
   console.log("Router:", await router.getAddress());
   console.log("Adapter:", await uniswapAdapter.getAddress());
+  console.log("Buy Amount:", initialBuyAmount);
 
   return {
     baseAsset,

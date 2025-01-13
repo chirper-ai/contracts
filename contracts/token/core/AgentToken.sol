@@ -313,8 +313,8 @@ contract AgentToken is
         address to,
         uint256 value
     ) internal virtual override {
-        // Skip tax logic for minting/burning operations
-        if (from == address(0) || to == address(0)) {
+        // Skip tax logic for minting/burning operations and during graduation
+        if (from == address(0) || to == address(0) || msg.sender == bondingContract) {
             super._update(from, to, value);
             return;
         }

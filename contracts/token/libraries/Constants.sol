@@ -55,11 +55,17 @@ library Constants {
     /// @notice Constant product K value for AMM (with 1e18 precision)
     uint256 public constant BONDING_K = 3_000_000 * 1e18; // Keep this the same
 
-    /// @notice Initial token supply for new launches
+    // @noticie Initial token reserve
     uint256 public constant INITIAL_TOKEN_SUPPLY = 100_000_000 * 10**18; // 100M tokens
 
+    // @noticie Initial token reserve
+    uint256 public constant INITIAL_ASSET_RESERVE = 10 * 10**18; // 10
+
     /// @notice Minimum initial purchase amount
-    uint256 public constant MIN_INITIAL_PURCHASE = 10 * 10**18; // 10 base asset
+    uint256 public constant MIN_INITIAL_PURCHASE = 1 * 10**18; // 1 base asset
+
+    /// @notice Maximum initial purchase amount
+    uint256 public constant INITIAL_PURCHASE_PERCENT = 5; // 5%
     
     /// @notice Maximum slippage allowed in graduation (5%)
     uint256 public constant MAX_GRADUATION_SLIPPAGE = 500;

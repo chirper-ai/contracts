@@ -45,6 +45,10 @@ contract AgentTokenFactory is
         // Default config for the new BondingManager
         // ( gradThreshold, dexAdapters, dexWeights, etc. )
         AgentBondingManager.CurveConfig curveConfig;
+
+        // Initial asset rate and buy amount
+        uint256 initialAssetRate;
+        uint256 initialBuyAmount;
     }
 
     /**
@@ -135,7 +139,9 @@ contract AgentTokenFactory is
             config.baseAsset,
             config.registry,
             config.managerPlatform,
-            config.curveConfig
+            config.curveConfig,
+            config.initialAssetRate,
+            config.initialBuyAmount
         );
 
         // Create the proxy, pointing to managerImpl
@@ -143,6 +149,15 @@ contract AgentTokenFactory is
             address(managerImpl),
             managerInitData
         );
+
+        // Transfer initial baseAsset from deployer to factory first
+        IERC20(config.baseAsset).transferFrom(msg.sender, address(this), config.initialBuyAmount);
+        
+        // Approve manager to spend factory's baseAsset
+        IERC20(config.baseAsset).approve(address(managerProxy), config.initialBuyAmount);
+
+        // Now the factory can provide the initial liquidity to the manager
+        // The manager will pull from the factory instead of tx.origin
 
         // --------------------------------------------------------------------
         // 2. Deploy the AgentToken IMPLEMENTATION

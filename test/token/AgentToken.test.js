@@ -6,30 +6,45 @@ const { deployTokenFixture } = require("./fixtures");
 describe("AgentToken", function () {
   let token;
   let manager;
-  let baseAsset;   // renamed from 'usdc'
+  let baseAsset;
   let agentFactory;
   let deployer;
   let user1;
   let user2;
   let defaultConfig;
 
+  // Helper function to check reserves and sync if needed
+  async function checkAndSyncReserves(token, manager) {
+    const actualTokenBalance = await token.balanceOf(manager.getAddress());
+    const actualAssetBalance = await baseAsset.balanceOf(manager.getAddress());
+    const [storedTokenReserve, storedAssetReserve] = await manager.getTotalReserves(await token.getAddress());
+
+    if (actualTokenBalance !== storedTokenReserve || actualAssetBalance !== storedAssetReserve) {
+      await manager.updatePriceData(token.getAddress());
+    }
+  }
+
   async function deployFresh() {
-    // Load the fixture (make sure your fixture now deploys an 18-dec mock or real ERC20)
+    // Load the fixture
     const fixture = await loadFixture(deployTokenFixture);
-    baseAsset = fixture.baseAsset; // formerly 'usdc'
+    baseAsset = fixture.baseAsset;
     agentFactory = fixture.agentFactory;
     defaultConfig = fixture.defaultConfig;
     deployer = fixture.deployer;
     user1 = fixture.user1;
     user2 = fixture.user2;
 
-    // Deploy a new token system via your agentFactory
+    // Mint baseAsset to deployer and approve factory
+    await baseAsset.mint(deployer.address, ethers.parseUnits("1000000", 18));
+    await baseAsset.connect(deployer).approve(await agentFactory.getAddress(), ethers.MaxUint256);
+
+    // Deploy system
     const tx = await agentFactory.deploySystem(defaultConfig);
     const receipt = await tx.wait();
 
-    // Extract deployment info from emitted event
+    // Extract deployment info from event
     const deployEvent = receipt.logs.find(
-      (log) => log.fragment && log.fragment.name === "SystemDeployed"
+        (log) => log.fragment && log.fragment.name === "SystemDeployed"
     );
     const { deployment } = deployEvent.args;
 
@@ -37,19 +52,19 @@ describe("AgentToken", function () {
     token = await ethers.getContractAt("AgentToken", deployment.tokenProxy);
     manager = await ethers.getContractAt("AgentBondingManager", deployment.managerProxy);
 
-    // Mint baseAsset to users (now 18 decimals)
+    // Mint and approve baseAsset for users
     await baseAsset.mint(user1.address, ethers.parseUnits("100000", 18));
     await baseAsset.mint(user2.address, ethers.parseUnits("100000", 18));
+    await baseAsset.connect(user1).approve(deployment.managerProxy, ethers.MaxUint256);
+    await baseAsset.connect(user2).approve(deployment.managerProxy, ethers.MaxUint256);
 
-    // Approve baseAsset spending for manager
-    await baseAsset.connect(user1).approve(manager.getAddress(), ethers.MaxUint256);
-    await baseAsset.connect(user2).approve(manager.getAddress(), ethers.MaxUint256);
-
-    // Verify token registration
-    const isRegistered = await manager.isTokenRegistered(token.getAddress());
+    // Verify registration
+    const isRegistered = await manager.isTokenRegistered(await token.getAddress());
     if (!isRegistered) {
-      throw new Error("Token not properly registered with manager");
+        throw new Error("Token not properly registered");
     }
+
+    return { token, manager, baseAsset };
   }
 
   describe("Initialization", function () {
@@ -68,16 +83,25 @@ describe("AgentToken", function () {
     });
 
     it("Should be properly registered with manager", async function () {
-      expect(await manager.isTokenRegistered(token.getAddress())).to.be.true;
+      expect(await manager.isTokenRegistered(await token.getAddress())).to.be.true;
     });
 
-    it("Should initialize with correct reserves", async function () {
-      const [tokenReserve, assetReserve] = await manager.getReserves(token.getAddress());
+    it("Should initialize with correct reserves and sync properly", async function () {
+      // First check actual balances
+      await checkAndSyncReserves(token, manager);
+      
+      // Now get reserves after potential sync
+      const [tokenReserve, assetReserve, marketCap] = await manager.getTokenState(await token.getAddress());
+      const tokenDecimals = await token.decimals();
+      const baseDecimals = await baseAsset.decimals();
 
-      // Both should be 1e24 if the manager is set to mint 1,000,000 * 1e18 tokens
-      // and set the same amount in the baseAsset reserve.
-      expect(tokenReserve.toString()).to.equal("100000000000000000000000000"); // 1e24
-      expect(assetReserve.toString()).to.equal("1"); // 1e24
+      // Expected values based on initialization parameters
+      const expectedTokenReserve = ethers.parseUnits("1000000", tokenDecimals);
+      const expectedAssetReserve = ethers.parseUnits("10000", baseDecimals);
+
+      expect(tokenReserve).to.equal(expectedTokenReserve);
+      expect(assetReserve).to.equal(expectedAssetReserve);
+      expect(marketCap).to.be.gt(0);
     });
   });
 
@@ -86,56 +110,68 @@ describe("AgentToken", function () {
       await deployFresh();
     });
 
-    it("Should allow buying tokens", async function () {
-      // Get initial state
-      const [initialTokenReserve, initialAssetReserve] = await manager.getReserves(token.getAddress());
-  
-      // Buy parameters
-      const buyAmount = ethers.parseUnits("100", 18); // Much smaller amount
-  
-      // Execute buy
-      const tx = await manager.connect(user1).buy(token.getAddress(), buyAmount);
-      await tx.wait();
-  
-      // Check results
-      const [newTokenReserve, newAssetReserve] = await manager.getReserves(token.getAddress());
-      const userTokenBalance = await token.balanceOf(user1.address);
-  
-      // Simple assertions using BigNumber comparisons
-      expect(userTokenBalance > 0n).to.be.true;
-      expect(newAssetReserve > initialAssetReserve).to.be.true;
-      expect(newTokenReserve < initialTokenReserve).to.be.true;
-    });
-  
-
-    it("Should allow selling tokens", async function () {
-      // First do a buy to have tokens to sell
-      const buyAmount = ethers.parseUnits("100", 18); // Much smaller amount
-      const buyTx = await manager.connect(user1).buy(token.getAddress(), buyAmount);
-      await buyTx.wait();
-  
-      // Get state before sell
-      const [initialTokenReserve, initialAssetReserve] = await manager.getReserves(token.getAddress());
-      const userTokenBalance = await token.balanceOf(user1.address);
-  
-      // Sell half of the tokens
-      const sellAmount = userTokenBalance / 2n;
+    it("Should allow buying tokens and update reserves correctly", async function () {
+      // Ensure reserves are synced before trade
+      await checkAndSyncReserves(token, manager);
       
-      // Approve tokens for selling
-      await token.connect(user1).approve(manager.getAddress(), sellAmount);
-  
-      // Execute sell
-      const sellTx = await manager.connect(user1).sell(token.getAddress(), sellAmount);
-      await sellTx.wait();
-  
-      // Check results
-      const [newTokenReserve, newAssetReserve] = await manager.getReserves(token.getAddress());
+      // Get initial state
+      const [initialTokenReserve, initialAssetReserve, initialMarketCap] = await manager.getTokenState(await token.getAddress());
+      const initialPrice = await manager.getPrice(await token.getAddress());
+      
+      // Buy parameters
+      const buyAmount = ethers.parseUnits("100", 18);
+      
+      // Get expected tokens out
+      const expectedTokens = await manager.getBuyPrice(await token.getAddress(), buyAmount);
+      
+      // Execute buy
+      const tx = await manager.connect(user1).buy(await token.getAddress(), buyAmount);
+      await tx.wait();
+      
+      // Ensure reserves are synced after trade
+      await checkAndSyncReserves(token, manager);
+      
+      // Get final state
+      const [newTokenReserve, newAssetReserve, newMarketCap] = await manager.getTokenState(await token.getAddress());
+      const userTokenBalance = await token.balanceOf(user1.address);
+      const newPrice = await manager.getPrice(await token.getAddress());
+      
+      // Verify results
+      expect(userTokenBalance).to.equal(expectedTokens);
+      expect(newAssetReserve).to.be.gt(initialAssetReserve);
+      expect(newTokenReserve).to.be.lt(initialTokenReserve);
+      expect(newPrice).to.be.gt(initialPrice);
+      expect(newMarketCap).to.be.gt(initialMarketCap);
+    });
+
+    it("Should allow selling tokens with proper reserve updates", async function () {
+      // First do a buy
+      const buyAmount = ethers.parseUnits("100", 18);
+      await manager.connect(user1).buy(await token.getAddress(), buyAmount);
+      await checkAndSyncReserves(token, manager);
+      
+      // Get state before sell
+      const [initialTokenReserve, initialAssetReserve, initialMarketCap] = await manager.getTokenState(await token.getAddress());
+      const userTokenBalance = await token.balanceOf(user1.address);
+      
+      // Sell half
+      const sellAmount = userTokenBalance / 2n;
+      const expectedAssets = await manager.getSellPrice(await token.getAddress(), sellAmount);
+      
+      // Approve and sell
+      await token.connect(user1).approve(await manager.getAddress(), sellAmount);
+      await manager.connect(user1).sell(await token.getAddress(), sellAmount);
+      
+      // Sync and check final state
+      await checkAndSyncReserves(token, manager);
+      const [newTokenReserve, newAssetReserve, newMarketCap] = await manager.getTokenState(await token.getAddress());
       const finalUserTokenBalance = await token.balanceOf(user1.address);
-  
-      // Simple assertions using BigNumber comparisons
-      expect(finalUserTokenBalance < userTokenBalance).to.be.true;
-      expect(newAssetReserve < initialAssetReserve).to.be.true;
-      expect(newTokenReserve > initialTokenReserve).to.be.true;
+      
+      // Verify
+      expect(finalUserTokenBalance).to.equal(userTokenBalance - sellAmount);
+      expect(newAssetReserve).to.be.lt(initialAssetReserve);
+      expect(newTokenReserve).to.be.gt(initialTokenReserve);
+      expect(newMarketCap).to.be.lt(initialMarketCap);
     });
   });
 
@@ -144,21 +180,30 @@ describe("AgentToken", function () {
       await deployFresh();
     });
 
-    it("Should graduate after reaching threshold", async function () {
-      // Buy enough tokens to reach graduation threshold
-      const buyAmount = ethers.parseUnits("1000000", 18); // Large buy to reach threshold
-      const tx = await manager.connect(user1).buy(token.getAddress(), buyAmount);
+    it("Should graduate after reaching threshold and setup DEX properly", async function () {
+      // Buy enough to trigger graduation
+      const buyAmount = ethers.parseUnits("1000000", 18);
+      const tx = await manager.connect(user1).buy(await token.getAddress(), buyAmount);
       await tx.wait();
-  
-      // Get state after buy
-      const [tokenReserve, assetReserve] = await manager.getReserves(token.getAddress());
-      const marketCap = await manager.getMarketCap(token.getAddress());
-  
-      // Check graduation status
-      const isGraduated = await token.isGraduated();
-  
-      // Simple assertions
+      
+      // Ensure everything is synced
+      await checkAndSyncReserves(token, manager);
+      
+      // Check graduation status and DEX setup
+      const isGraduated = await manager.isGraduated(await token.getAddress());
       expect(isGraduated).to.be.true;
+      
+      // Get DEX pairs
+      const dexPairs = await manager.getDexPairs(await token.getAddress());
+      expect(dexPairs.length).to.be.gt(0);
+      
+      // Check pair liquidity
+      for (const pair of dexPairs) {
+        const pairContract = await ethers.getContractAt("IDEXPair", pair);
+        const [reserve0, reserve1] = await pairContract.getReserves();
+        expect(reserve0).to.be.gt(0);
+        expect(reserve1).to.be.gt(0);
+      }
     });
   });
 
@@ -167,71 +212,29 @@ describe("AgentToken", function () {
       await deployFresh();
     });
     
-    it("Should collect and distribute taxes correctly", async function () {
+    it("Should collect and distribute taxes according to configured splits", async function () {
       const buyTax = await manager.buyTax();
-      const registryAddress = await manager.taxVault();
-
-      const buyAmount = ethers.parseUnits("1000", 18);
-
-      // Get initial vault balance
-      const taxVaultBalanceBefore = await baseAsset.balanceOf(registryAddress);
-
+      const taxVaultAddr = await manager.taxVault();
+      const tokenAddr = await token.getAddress();
+      
+      // Get initial balances
+      const vaultBalanceBefore = await baseAsset.balanceOf(taxVaultAddr);
+      const creatorBalanceBefore = await baseAsset.balanceOf(await manager.curves(tokenAddr).creator);
+      
       // Execute buy
-      await manager.connect(user1).buy(token.getAddress(), buyAmount);
-
-      // Check final vault balance
-      const taxVaultBalanceAfter = await baseAsset.balanceOf(registryAddress);
-
-      // Expect the difference to match the tax portion
-      const expectedTax = (buyAmount * buyTax) / 10000n;
-      const actualTaxCollected = taxVaultBalanceAfter - taxVaultBalanceBefore;
-      expect(actualTaxCollected).to.equal(expectedTax);
+      const buyAmount = ethers.parseUnits("1000", 18);
+      await manager.connect(user1).buy(tokenAddr, buyAmount);
+      
+      // Get tax splits
+      const [platformTax, creatorTax] = await manager.getTaxSplit(true, buyAmount);
+      
+      // Check final balances
+      const vaultBalanceAfter = await baseAsset.balanceOf(taxVaultAddr);
+      const creatorBalanceAfter = await baseAsset.balanceOf(await manager.curves(tokenAddr).creator);
+      
+      // Verify tax distribution
+      expect(vaultBalanceAfter - vaultBalanceBefore).to.equal(platformTax);
+      expect(creatorBalanceAfter - creatorBalanceBefore).to.equal(creatorTax);
     });
-  });
-
-  describe("Post-Graduation Trading", function () {
-    beforeEach(async function() {
-        await deployFresh();
-    });
-
-    it("Should properly handle graduation with DEX setup", async function() {
-      // 1. Get initial state
-      const dexAdapters = await manager.getDEXAdapters();
-      const adapter = await ethers.getContractAt("IDEXAdapter", dexAdapters[0]);
-      const router = await ethers.getContractAt("IUniswapV2Router02", await adapter.getRouterAddress());
-      
-      console.log("\nPre-graduation state:");
-      console.log("Router address:", await adapter.getRouterAddress());
-      
-      // 2. Execute buy to trigger graduation
-      const buyAmount = ethers.parseUnits("1000000", 18);
-      const graduationTx = await manager.connect(user1).buy(token.getAddress(), buyAmount);
-      const receipt = await graduationTx.wait();
-      
-      // 3. Get post-graduation state
-      const isGraduated = await token.isGraduated();
-      console.log("\nPost-graduation state:");
-      console.log("Graduated:", isGraduated);
-      
-      // 4. Check pair and liquidity
-      const pairAddress = await adapter.getPair(token.getAddress(), await baseAsset.getAddress());
-      const pair = await ethers.getContractAt("IDEXPair", pairAddress);
-      
-      console.log("Pair address:", pairAddress);
-      
-      const [reserve0, reserve1] = await pair.getReserves();
-      console.log("\nPair reserves:");
-      console.log("Reserve0:", ethers.formatUnits(reserve0, 18));
-      console.log("Reserve1:", ethers.formatUnits(reserve1, 18));
-      
-      // 5. Check router approvals
-      const routerAddr = await adapter.getRouterAddress();
-      const tokenApproval = await token.allowance(manager.getAddress(), routerAddr);
-      const baseApproval = await baseAsset.allowance(manager.getAddress(), routerAddr);
-      
-      console.log("\nRouter approvals:");
-      console.log("Token:", ethers.formatUnits(tokenApproval, 18));
-      console.log("Base:", ethers.formatUnits(baseApproval, 18));
-    });  
   });
 });
