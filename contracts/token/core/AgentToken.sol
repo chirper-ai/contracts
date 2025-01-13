@@ -313,8 +313,16 @@ contract AgentToken is
         address to,
         uint256 value
     ) internal virtual override {
-        // Skip tax logic for minting/burning operations and during graduation
-        if (from == address(0) || to == address(0) || msg.sender == bondingContract) {
+        // Skip tax logic for:
+        // 1. Minting/burning operations
+        // 2. Transfers from/to bonding contract
+        // 3. Transfers from/to self
+        // 4. When sender is excluded from tax
+        if (from == address(0) || 
+            to == address(0) || 
+            msg.sender == bondingContract ||
+            msg.sender == address(this) ||
+            isExcludedFromTax[msg.sender]) {
             super._update(from, to, value);
             return;
         }
@@ -330,14 +338,14 @@ contract AgentToken is
         bool isSell = false;
 
         if (!isGraduated) {
-            // Pre-graduation: Check if from/to the bonding contract
+            // Pre-graduation logic
             if (to == bondingContract) {
                 isSell = true;
             } else if (from == bondingContract) {
                 isBuy = true;
             }
         } else {
-            // Post-graduation: Check if from/to recognized DEX pairs
+            // Post-graduation logic
             if (dexPairs[from]) {
                 isBuy = true;
             } else if (dexPairs[to]) {
@@ -346,7 +354,7 @@ contract AgentToken is
         }
 
         uint256 taxRate = isBuy ? buyTax : (isSell ? sellTax : 0);
-
+        
         if (taxRate > 0) {
             uint256 totalTax = (value * taxRate) / Constants.BASIS_POINTS;
             if (totalTax > 0) {
@@ -363,11 +371,12 @@ contract AgentToken is
                 super._update(from, to, netAmount);
 
                 emit TaxCollected(from, to, platformTaxAmount, creatorTaxAmount, isBuy);
+                return;
             }
-        } else {
-            // No tax
-            super._update(from, to, value);
         }
+        
+        // No tax
+        super._update(from, to, value);
     }
 
     // ------------------------------------------------------------------------

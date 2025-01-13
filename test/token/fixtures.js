@@ -19,25 +19,18 @@ async function deployTokenFixture() {
 
   // 3. Deploy UniswapV2Factory
   const factoryFactory = await ethers.getContractFactory(UniswapV2Factory.abi, UniswapV2Factory.bytecode);
-  const factory = await factoryFactory.deploy(deployer.address);
-  await factory.waitForDeployment();
+  const uniswapFactory = await factoryFactory.deploy(deployer.address);
+  await uniswapFactory.waitForDeployment();
 
   // 4. Deploy UniswapV2Router02
   const routerFactory = await ethers.getContractFactory(UniswapV2Router02.abi, UniswapV2Router02.bytecode);
-  const router = await routerFactory.deploy(
-    await factory.getAddress(),
+  const uniswapRouter = await routerFactory.deploy(
+    await uniswapFactory.getAddress(),
     await weth.getAddress()
   );
-  await router.waitForDeployment();
+  await uniswapRouter.waitForDeployment();
 
-  // 5. Deploy UniswapV2Adapter with real router
-  const UniswapV2Adapter = await ethers.getContractFactory("UniswapAdapter");
-  const uniswapAdapter = await UniswapV2Adapter.deploy(
-    await router.getAddress()
-  );
-  await uniswapAdapter.waitForDeployment();
-
-  // 6. Deploy AgentTokenFactory with proxy
+  // 5. Deploy AgentTokenFactory with proxy
   const AgentTokenFactory = await ethers.getContractFactory("AgentTokenFactory");
   const agentFactory = await upgrades.deployProxy(
     AgentTokenFactory,
@@ -48,49 +41,49 @@ async function deployTokenFixture() {
   );
   await agentFactory.waitForDeployment();
 
-  // 7. Set up initial buy amount (10 BASE)
+  // 6. Set up initial buy amount (10 BASE)
   const initialBuyAmount = ethers.parseUnits("10", 18);
 
-  // 8. Define default curve config
+  // 7. Define deployment config with simplified structure
   const defaultConfig = {
+    // AgentToken init args
     name: "Test Token",
     symbol: "TEST",
     platform: deployer.address,
+    
+    // BondingManager init args
     baseAsset: await baseAsset.getAddress(),
-    registry: deployer.address,
+    taxVault: deployer.address,
     managerPlatform: deployer.address,
-    initialAssetRate: ethers.parseUnits("1", 18),
-    initialBuyAmount: initialBuyAmount,
-    curveConfig: {
-      gradThreshold: ethers.parseUnits("1000000", 18), // 1M BASE for graduation
-      dexAdapters: [await uniswapAdapter.getAddress()],
-      dexWeights: [100], // 100%
-    },
+    uniswapFactory: await uniswapFactory.getAddress(),
+    uniswapRouter: await uniswapRouter.getAddress(),
+    graduationThreshold: ethers.parseUnits("1000000", 18), // 1M BASE for graduation
+    assetRate: ethers.parseUnits("1", 18),
+    initialBuyAmount: initialBuyAmount
   };
 
-  // 9. Mint larger initial supply of base asset to users for testing
-  const INITIAL_ASSET_AMOUNT = ethers.parseUnits("1000000", 18); // 1M BASE tokens
+  // 8. Mint initial base asset for deployer and approve
+  await baseAsset.mint(deployer.address, ethers.parseUnits("1000000", 18));
+  await baseAsset.connect(deployer).approve(await agentFactory.getAddress(), ethers.MaxUint256);
+
+  // 9. Mint initial base asset for users
+  const INITIAL_ASSET_AMOUNT = ethers.parseUnits("1000000", 18);
   await baseAsset.mint(user1.address, INITIAL_ASSET_AMOUNT);
   await baseAsset.mint(user2.address, INITIAL_ASSET_AMOUNT);
 
-  // 10. Approve router for token spending
-  await baseAsset.connect(user1).approve(router.getAddress(), ethers.MaxUint256);
-  await baseAsset.connect(user2).approve(router.getAddress(), ethers.MaxUint256);
-
   // Log deployment addresses for debugging
-  console.log("Deployment addresses:");
+  console.log("\nDeployment addresses:");
   console.log("Base Asset:", await baseAsset.getAddress());
   console.log("WETH:", await weth.getAddress());
-  console.log("Factory:", await factory.getAddress());
-  console.log("Router:", await router.getAddress());
-  console.log("Adapter:", await uniswapAdapter.getAddress());
-  console.log("Buy Amount:", initialBuyAmount);
+  console.log("Uniswap Factory:", await uniswapFactory.getAddress());
+  console.log("Uniswap Router:", await uniswapRouter.getAddress());
+  console.log("Agent Factory:", await agentFactory.getAddress());
+  console.log("Initial Buy Amount:", initialBuyAmount.toString());
 
   return {
     baseAsset,
-    uniswapAdapter,
-    factory,
-    router,
+    uniswapFactory,
+    uniswapRouter,
     agentFactory,
     defaultConfig,
     deployer,
