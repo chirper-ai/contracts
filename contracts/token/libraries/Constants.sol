@@ -1,4 +1,3 @@
-// file: contracts/token/libraries/Constants.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
@@ -26,36 +25,44 @@ library Constants {
     bytes32 public constant PLATFORM_ROLE = keccak256("PLATFORM_ROLE");
 
     /*//////////////////////////////////////////////////////////////
+                          VARIOUS CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+
+    // Dead address for burning LP tokens
+    address public constant DEAD_ADDRESS = 0x000000000000000000000000000000000000dEaD;
+
+    /*//////////////////////////////////////////////////////////////
                               FEE CONFIG
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Basis points denominator (100%)
-    uint96 public constant BASIS_POINTS = 10000;
+    uint256 public constant BASIS_POINTS = 10000;
 
     /// @notice Platform's share of trading fees (50%)
-    uint96 public constant PLATFORM_FEE_SHARE = 50;
+    uint256 public constant PLATFORM_FEE_SHARE = 50;
 
     /// @notice Creator's share of trading fees (50%) 
-    uint96 public constant CREATOR_FEE_SHARE = 50;
+    uint256 public constant CREATOR_FEE_SHARE = 50;
 
     /// @notice Maximum tax rate (10%)
-    uint96 public constant MAX_TAX_RATE = 1000;
+    uint256 public constant MAX_TAX_RATE = 1000;
 
     /*//////////////////////////////////////////////////////////////
                           BONDING CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Constant product K value for AMM
-    uint256 public constant BONDING_K = 3_000_000_000_000;
+
+    /// @notice Constant product K value for AMM (with 1e18 precision)
+    uint256 public constant BONDING_K = 3_000_000 * 1e18; // Keep this the same
 
     /// @notice Initial token supply for new launches
-    uint256 public constant INITIAL_TOKEN_SUPPLY = 1_000_000 * 10**18; // 1M tokens
+    uint256 public constant INITIAL_TOKEN_SUPPLY = 100_000_000 * 10**18; // 100M tokens
 
+    /// @notice Minimum initial purchase amount
+    uint256 public constant MIN_INITIAL_PURCHASE = 10 * 10**18; // 10 base asset
+    
     /// @notice Maximum slippage allowed in graduation (5%)
-    uint96 public constant MAX_GRADUATION_SLIPPAGE = 500;
-
-    /// @notice Graduation liquidity timeout
-    uint256 public constant GRADUATION_TIMEOUT = 300; // 5 minutes
+    uint256 public constant MAX_GRADUATION_SLIPPAGE = 500;
 
     /// @notice Minimum price impact allowed (0.1%)
     uint256 public constant MIN_PRICE_IMPACT = 10;

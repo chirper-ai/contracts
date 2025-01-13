@@ -20,8 +20,11 @@ importers:
       '@openzeppelin/contracts-upgradeable':
         specifier: ^5.2.0
         version: 5.2.0(@openzeppelin/contracts@5.2.0)
+      '@uniswap/v2-core':
+        specifier: ^1.0.1
+        version: 1.0.1
       '@uniswap/v2-periphery':
-        specifier: ^1.1.0-beta.0
+        specifier: 1.1.0-beta.0
         version: 1.1.0-beta.0
       ethers:
         specifier: ^6.13.5
@@ -539,6 +542,10 @@ packages:
 
   '@uniswap/v2-core@1.0.0':
     resolution: {integrity: sha512-BJiXrBGnN8mti7saW49MXwxDBRFiWemGetE58q8zgfnPPzQKq55ADltEILqOt6VFZ22kVeVKbF8gVd8aY3l7pA==}
+    engines: {node: '>=10'}
+
+  '@uniswap/v2-core@1.0.1':
+    resolution: {integrity: sha512-MtybtkUPSyysqLY2U210NBDeCHX+ltHt3oADGdjqoThZaFRDKwM6k1Nb3F0A3hk5hwuQvytFWhrWHOEq6nVJ8Q==}
     engines: {node: '>=10'}
 
   '@uniswap/v2-periphery@1.1.0-beta.0':
@@ -3026,6 +3033,8 @@ snapshots:
   '@uniswap/lib@1.1.1': {}
 
   '@uniswap/v2-core@1.0.0': {}
+
+  '@uniswap/v2-core@1.0.1': {}
 
   '@uniswap/v2-periphery@1.1.0-beta.0':
     dependencies:

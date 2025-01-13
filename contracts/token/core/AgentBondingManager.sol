@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "hardhat/console.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
@@ -9,18 +10,31 @@ import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./AgentToken.sol";
-import "../interfaces/IDEXAdapter.sol";
+import "../interfaces/IDEXInterfaces.sol";
 import "../libraries/Constants.sol";
+import "../libraries/ErrorLibrary.sol";
 
 /**
  * @title AgentBondingManager
- * @notice Manages bonding-curve lifecycle and then locks external DEX liquidity by burning LP tokens upon graduation.
- * @dev Key features:
- *  - Launch new tokens (charging a native-token launch fee)
- *  - Handle buy/sell via bonding curve
- *  - On graduation, provides liquidity to external DEXes and burns LP tokens
- *  - Uses AccessControl for role-based permissions
- *  - NonReentrant, Pausable
+ * @notice Manages the entire lifecycle of AI agent tokens from launch through a bonding curve, then graduates to DEX.
+ * 
+ * @dev Key Features:
+ *  - Launches new AI agent tokens (requires initial buy amount).
+ *  - Implements a bonding curve (constant product) for trading.
+ *  - Tracks price and market cap data in the `baseAsset`.
+ *  - Graduates tokens to external DEXes and burns LP tokens.
+ *  - Utilizes AccessControl for role-based permissions.
+ *  - ReentrancyGuard and Pausable for security.
+ *
+ * @custom:security-contact security@yourdomain.com
+ *
+ * ----------------------------------------------------------------------------
+ * CHANGES IN THIS VERSION (for a standard 18-decimal ERC20 baseAsset):
+ *  - Removed references to 6-decimal USDC scaling.
+ *  - We now assume `baseAsset` has 18 decimals, matching the new agent tokens.
+ *  - Initial liquidity is 1:1 in token count (e.g. 1M agent tokens => 1M baseAsset).
+ *  - All bonding-curve math is done directly with 18 decimals (no scaleFactor).
+ * ----------------------------------------------------------------------------
  */
 contract AgentBondingManager is
     Initializable,
@@ -36,33 +50,53 @@ contract AgentBondingManager is
 
     /**
      * @notice Configuration for how a token graduates to DEX
+     * @param gradThreshold Amount of baseAsset tokens needed for graduation
+     * @param dexAdapters Array of DEX adapter addresses for graduation
+     * @param dexWeights Percentage weights for each DEX (must sum to 100)
      */
     struct CurveConfig {
-        uint256 gradThreshold;     // Threshold for graduation
-        address[] dexAdapters;     // DEX adapters for graduation
-        uint256[] dexWeights;      // Weights for each DEX (must sum to 100)
+        uint256 gradThreshold;     
+        address[] dexAdapters;     
+        uint256[] dexWeights;      
     }
 
     /**
-     * @notice Per-token data for the bonding curve
+     * @notice Comprehensive data for each token's bonding curve
+     * @param token Token contract address
+     * @param creator Token creator address for tax distribution
+     * @param tokenReserve Current token reserve in the curve
+     * @param assetReserve Current baseAsset reserve in the curve
+     * @param graduated Whether token has graduated to DEX
+     * @param dexPairs DEX pair addresses after graduation
+     * @param currentPrice Current token price in baseAsset (scaled by 1e18)
+     * @param marketCap Current market cap in baseAsset
+     * @param lastPrice Last recorded price for 24h comparison
+     * @param lastUpdateTime Timestamp of last price update
      */
     struct CurveData {
-        address token;             // Token address
-        address creator;           // Creator for tax distribution
-        uint256 tokenReserve;      // Reserve of token
-        uint256 assetReserve;      // Reserve of base asset
-        bool graduated;            // Whether graduated to DEX
-        address[] dexPairs;        // DEX pair addresses after graduation
+        address token;             
+        address creator;           
+        uint256 tokenReserve;      
+        uint256 assetReserve;      
+        bool graduated;            
+        address[] dexPairs;        
+        uint256 currentPrice;      
+        uint256 marketCap;         
+        uint256 lastPrice;         
+        uint256 lastUpdateTime;    
     }
 
     // ------------------------------------------------------------------------
     // STATE VARIABLES
     // ------------------------------------------------------------------------
 
-    /// @notice Base asset for all curves (e.g. USDC)
+    /// @notice Address of the factory that deployed this manager
+    address public factory;
+
+    /// @notice Base asset token (assumed 18 decimals)
     IERC20 public baseAsset;
 
-    /// @notice Tax vault address for platform share
+    /// @notice Protocol tax vault address
     address public taxVault;
 
     /// @notice Buy tax in basis points (100 = 1%)
@@ -71,29 +105,37 @@ contract AgentBondingManager is
     /// @notice Sell tax in basis points (100 = 1%)
     uint256 public sellTax;
 
+    /// @notice Configurable rate that affects curve steepness (not used in formula below, but left for future expansions)
+    uint256 public assetRate;
+
+    /// @notice Required initial buy amount in baseAsset
+    uint256 public initialBuyAmount;
+
     /// @notice Default configuration for new curves
     CurveConfig public defaultConfig;
 
-    /// @notice Maps token address to curve data
+    /// @notice Maps token address to its curve data
     mapping(address => CurveData) public curves;
 
     /// @notice List of all launched tokens
     address[] public tokens;
 
-    // ------------------------------------------------------------------------
-    // LAUNCH FEE STATE
-    // ------------------------------------------------------------------------
-
-    /// @notice Fee in native chain token required to launch
-    uint256 public launchFee;
-
-    /// @notice Address that receives the launch fee
-    address public feeRecipient;
+    /// @notice Maps token address to registration status
+    mapping(address => bool) public isTokenRegistered;
 
     // ------------------------------------------------------------------------
     // EVENTS
     // ------------------------------------------------------------------------
 
+    /**
+     * @notice Emitted when a new token is launched
+     * @param token Address of the new token
+     * @param creator Address of token creator
+     * @param name Token name
+     * @param symbol Token symbol
+     * @param initialTokenReserve Initial token reserve
+     * @param initialAssetReserve Initial baseAsset reserve
+     */
     event TokenLaunched(
         address indexed token,
         address indexed creator,
@@ -103,6 +145,16 @@ contract AgentBondingManager is
         uint256 initialAssetReserve
     );
 
+    /**
+     * @notice Emitted on each trade
+     * @param token Token being traded
+     * @param trader Address executing the trade
+     * @param isBuy Whether it's a buy (true) or sell (false)
+     * @param tokenAmount Amount of tokens traded
+     * @param assetAmount Amount of baseAsset tokens traded
+     * @param platformTax Amount of tax sent to platform
+     * @param creatorTax Amount of tax sent to creator
+     */
     event Trade(
         address indexed token,
         address indexed trader,
@@ -113,12 +165,35 @@ contract AgentBondingManager is
         uint256 creatorTax
     );
 
+    /**
+     * @notice Emitted when a token graduates to DEX
+     * @param token Address of graduated token
+     * @param dexPairs Array of DEX pair addresses
+     * @param amounts Liquidity amounts provided to each DEX
+     */
     event TokenGraduated(
         address indexed token,
         address[] dexPairs,
         uint256[] amounts
     );
 
+    /**
+     * @notice Emitted when liquidity is added to a DEX pair
+     */
+    event LiquidityAdded(
+        address indexed token,
+        address indexed pair,
+        uint256 amountA,
+        uint256 amountB,
+        uint256 liquidity
+    );
+
+    /**
+     * @notice Emitted when tax configuration is updated
+     * @param taxVault New tax vault address
+     * @param buyTax New buy tax rate
+     * @param sellTax New sell tax rate
+     */
     event TaxConfigUpdated(
         address indexed taxVault,
         uint256 buyTax,
@@ -126,62 +201,86 @@ contract AgentBondingManager is
     );
 
     /**
-     * @notice Emitted when the launch fee is set
-     * @param fee The new launch fee (in native token)
+     * @notice Emitted when asset rate is updated
+     * @param oldRate Previous asset rate
+     * @param newRate New asset rate
      */
-    event LaunchFeeSet(uint256 fee);
+    event AssetRateUpdated(
+        uint256 oldRate,
+        uint256 newRate
+    );
 
     /**
-     * @notice Emitted when the fee recipient is changed
-     * @param recipient The new fee recipient address
+     * @notice Emitted when initial buy amount is updated
+     * @param newAmount New required initial buy amount
      */
-    event FeeRecipientSet(address recipient);
+    event InitialBuyAmountUpdated(uint256 newAmount);
 
     /**
-     * @notice Emitted when a user pays the launch fee
-     * @param payer The user who paid the fee
-     * @param amount The amount paid in native tokens
+     * @notice Emitted when a token's price data is updated
+     * @param token Token address
+     * @param oldPrice Previous price
+     * @param newPrice New price
+     * @param marketCap New market cap
+     * @param timestamp Update timestamp
      */
-    event LaunchFeePaid(address indexed payer, uint256 amount);
+    event PriceUpdated(
+        address indexed token,
+        uint256 oldPrice,
+        uint256 newPrice,
+        uint256 marketCap,
+        uint256 timestamp
+    );
+
+    /**
+     * @notice Emitted when a token is registered
+     * @param token Address of registered token
+     */
+    event TokenRegistered(address indexed token);
 
     // ------------------------------------------------------------------------
-    // CONSTRUCTOR (DISABLED FOR UPGRADEABLE)
+    // CONSTRUCTOR & INITIALIZER
     // ------------------------------------------------------------------------
 
     /**
-     * @dev Disables initializers to prevent calling initialize() outside proxy
+     * @dev Prevents direct initialization of implementation contract
      * @custom:oz-upgrades-unsafe-allow constructor
      */
     constructor() {
         _disableInitializers();
     }
 
-    // ------------------------------------------------------------------------
-    // INITIALIZER
-    // ------------------------------------------------------------------------
-
     /**
-     * @notice Initializes the contract
-     * @dev Must only be called once (by proxy's initializer)
-     * @param _baseAsset Address of the base asset (e.g., USDC)
-     * @param _registry Tax vault (or registry) address
-     * @param _platform Address with the PLATFORM_ROLE
+     * @notice Initializes the contract with required parameters
+     * @dev Must only be called once by proxy
+     * @param _baseAsset Address of base asset token (18 decimals recommended)
+     * @param _registry Tax vault address
+     * @param _platform Platform admin address
      * @param _config Default curve configuration
+     * @param _initialAssetRate Initial asset rate for curve adjustment (unused in formula here, but stored)
+     * @param _initialBuyAmount Required initial buy amount in baseAsset
      */
     function initialize(
         address _baseAsset,
         address _registry,
         address _platform,
-        CurveConfig calldata _config
+        CurveConfig calldata _config,
+        uint256 _initialAssetRate,
+        uint256 _initialBuyAmount
     ) external initializer {
         ErrorLibrary.validateAddress(_baseAsset, "baseAsset");
         ErrorLibrary.validateAddress(_registry, "registry");
         ErrorLibrary.validateAddress(_platform, "platform");
         _validateConfig(_config);
+        require(_initialAssetRate > 0, "Invalid asset rate");
+        require(_initialBuyAmount > 0, "Invalid initial buy amount");
 
         __AccessControl_init();
         __ReentrancyGuard_init();
         __Pausable_init();
+
+        // Store factory address
+        factory = msg.sender;
 
         // Grant roles
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -190,157 +289,110 @@ contract AgentBondingManager is
         _grantRole(Constants.PAUSER_ROLE, msg.sender);
         _grantRole(Constants.PLATFORM_ROLE, _platform);
 
-        // Assign state variables
+        // Initialize state variables
         baseAsset = IERC20(_baseAsset);
         taxVault = _registry;
         defaultConfig = _config;
+        assetRate = _initialAssetRate;
+        initialBuyAmount = _initialBuyAmount;
 
-        // Set default tax rates (e.g. 1% each)
+        // Set default tax rates
         buyTax = 100;  // 1%
         sellTax = 100; // 1%
-
-        // Initialize fee-related variables (can be changed later by admin)
-        launchFee = 0;       // default = 0
-        feeRecipient = msg.sender; // default to admin
     }
 
     // ------------------------------------------------------------------------
-    // CONFIGURE LAUNCH FEE
+    // TOKEN LAUNCH & REGISTRATION
     // ------------------------------------------------------------------------
 
     /**
-     * @notice Sets the launch fee in native tokens
-     * @dev Only callable by admin
-     * @param _fee Amount of native token required
+     * @notice Launches an existing token with the manager
+     * @dev Only callable by factory, uses same initialization as registerToken but with better pricing logic
+     * @param token Token address to launch
      */
-    function setLaunchFee(uint256 _fee) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        launchFee = _fee;
-        emit LaunchFeeSet(_fee);
-    }
+    function launchToken(address token) external {
+        require(msg.sender == factory, "Only factory can launch");
+        require(!isTokenRegistered[token], "Already registered");
+        require(token != address(0), "Cannot launch zero address");
 
-    /**
-     * @notice Sets the address that receives the launch fee
-     * @dev Only callable by admin
-     * @param recipient The new fee recipient
-     */
-    function setFeeRecipient(address recipient) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        ErrorLibrary.validateAddress(recipient, "recipient");
-        feeRecipient = recipient;
-        emit FeeRecipientSet(recipient);
-    }
+        isTokenRegistered[token] = true;
 
-    // ------------------------------------------------------------------------
-    // TOKEN LAUNCH & BONDING CURVE FUNCTIONS
-    // ------------------------------------------------------------------------
+        // Start with bare minimum to make price near zero
+        uint256 initialTokenReserve = Constants.INITIAL_TOKEN_SUPPLY;  // 100M * 1e18 tokens
+        uint256 initialAssetReserve = 1;  // 1 wei
 
-    /**
-     * @notice Creates a new token with bonding curve (requires a native token fee)
-     * @dev This function is payable, so the user can send the native token (e.g. BNB/MATIC/AVAX)
-     * @param name Token name
-     * @param symbol Token symbol
-     * @param platform Platform address for the token
-     * @return token Address of the newly launched token
-     */
-    function launchToken(
-        string calldata name,
-        string calldata symbol,
-        address platform
-    )
-        external
-        payable
-        nonReentrant
-        whenNotPaused
-        returns (address token)
-    {
-        require(platform != address(0), Constants.ERR_ZERO_ADDRESS);
-
-        // --------------------------------------------------------------------
-        // 1. Enforce launch fee in native token
-        // --------------------------------------------------------------------
-        require(msg.value >= launchFee, "Insufficient launch fee");
-        (bool successFee, ) = feeRecipient.call{value: launchFee}("");
-        require(successFee, "Fee transfer failed");
-
-        // Refund any excess back to user
-        uint256 excess = msg.value - launchFee;
-        if (excess > 0) {
-            (bool successRefund, ) = msg.sender.call{value: excess}("");
-            require(successRefund, "Refund transfer failed");
-        }
-
-        emit LaunchFeePaid(msg.sender, launchFee);
-
-        // --------------------------------------------------------------------
-        // 2. Create the token (AgentToken)
-        // --------------------------------------------------------------------
-        AgentToken newToken = new AgentToken();
-        newToken.initialize(
-            name,
-            symbol,
-            address(this),  // bondingContract
-            taxVault,       // protocol tax vault
-            platform        // platform admin
-        );
-
-        // 3. Set up initial reserves based on constant K
-        uint256 initialTokenReserve = Constants.INITIAL_TOKEN_SUPPLY;
-        uint256 initialAssetReserve = Constants.BONDING_K / initialTokenReserve;
-
-        // 4. Transfer initial base asset from user to contract
-        baseAsset.safeTransferFrom(msg.sender, address(this), initialAssetReserve);
-
-        // 5. Initialize curve data
-        CurveData storage curve = curves[address(newToken)];
-        curve.token = address(newToken);
-        curve.creator = msg.sender;
+        // Initialize curve data
+        CurveData storage curve = curves[token];
+        curve.token = token;
+        curve.creator = tx.origin;
         curve.tokenReserve = initialTokenReserve;
         curve.assetReserve = initialAssetReserve;
+        
+        // Calculate initial price
+        curve.currentPrice = (curve.assetReserve * 1e18) / curve.tokenReserve;
+        curve.marketCap = (curve.currentPrice * curve.tokenReserve) / 1e18;
+        curve.lastPrice = curve.currentPrice;
+        curve.lastUpdateTime = block.timestamp;
 
-        tokens.push(address(newToken));
+        // Mint initial tokens to this contract
+        AgentToken(token).mint(address(this), initialTokenReserve);
+
+        tokens.push(token);
 
         emit TokenLaunched(
-            address(newToken),
-            msg.sender,
-            name,
-            symbol,
-            initialTokenReserve,
-            initialAssetReserve
+            token,
+            tx.origin,
+            AgentToken(token).name(),
+            AgentToken(token).symbol(),
+            curve.tokenReserve,
+            curve.assetReserve
         );
 
-        return address(newToken);
+        emit PriceUpdated(
+            token,
+            0,
+            curve.currentPrice,
+            curve.marketCap,
+            block.timestamp
+        );
     }
 
+
+    // ------------------------------------------------------------------------
+    // TRADING FUNCTIONS
+    // ------------------------------------------------------------------------
+
     /**
-     * @notice Buy tokens from the bonding curve with price impact protection
-     * @param token Address of the token to buy
-     * @param assetAmount Amount of base asset to spend (includes tax)
+     * @notice Buys tokens from the bonding curve
+     * @dev Includes tax and slippage protection
+     * @param token Address of token to buy
+     * @param assetAmount Amount of baseAsset to spend (includes tax)
      * @return tokenAmount Amount of tokens received
      */
     function buy(
         address token,
         uint256 assetAmount
     ) external nonReentrant whenNotPaused returns (uint256 tokenAmount) {
-        require(assetAmount >= Constants.MIN_OPERATION_AMOUNT, Constants.ERR_ZERO_AMOUNT);
+        require(assetAmount >= Constants.MIN_OPERATION_AMOUNT, "Amount too small");
+        require(isTokenRegistered[token], "Token not found");
 
         CurveData storage curve = curves[token];
-        require(curve.token != address(0), "Token not found");
         require(!curve.graduated, "Token graduated");
-
-        // Calculate total tax
+        
+        // Calculate tax amounts
         uint256 totalTaxAmount = (assetAmount * buyTax) / Constants.BASIS_POINTS;
-
-        // Split tax
         uint256 platformTaxAmount = (totalTaxAmount * Constants.PLATFORM_FEE_SHARE) /
             (Constants.PLATFORM_FEE_SHARE + Constants.CREATOR_FEE_SHARE);
         uint256 creatorTaxAmount = totalTaxAmount - platformTaxAmount;
 
-        // Net amount going into the curve
+        // Calculate net amount after tax
         uint256 netAmount = assetAmount - totalTaxAmount;
+        require(netAmount > 0, "Net amount after tax is zero");
 
-        // Transfer entire assetAmount from user to contract
+        // Transfer asset from buyer first
         baseAsset.safeTransferFrom(msg.sender, address(this), assetAmount);
 
-        // Pay out taxes
+        // Distribute taxes
         if (platformTaxAmount > 0) {
             baseAsset.safeTransfer(taxVault, platformTaxAmount);
         }
@@ -348,222 +400,478 @@ contract AgentBondingManager is
             baseAsset.safeTransfer(curve.creator, creatorTaxAmount);
         }
 
-        // Prevent underflow (explicit check)
+        // Calculate token amount using constant product formula
+        uint256 oldK = curve.tokenReserve * curve.assetReserve;
         uint256 newAssetReserve = curve.assetReserve + netAmount;
-        uint256 kOverNewReserve = Constants.BONDING_K / newAssetReserve;
-        require(
-            kOverNewReserve <= curve.tokenReserve,
-            "Insufficient token reserve"
-        );
-
-        // Calculate how many tokens the user gets
-        tokenAmount = curve.tokenReserve - kOverNewReserve;
+        uint256 newTokenReserve = oldK / newAssetReserve;
+        
+        require(newTokenReserve < curve.tokenReserve, "Invalid token calculation");
+        tokenAmount = curve.tokenReserve - newTokenReserve;
+        require(tokenAmount > 0, "No tokens to transfer");
 
         // Update reserves
         curve.assetReserve = newAssetReserve;
-        curve.tokenReserve -= tokenAmount;
+        curve.tokenReserve = newTokenReserve;
 
-        // Mint tokens to buyer
-        AgentToken(token).mint(msg.sender, tokenAmount);
+        // Update price data
+        uint256 oldPrice = curve.currentPrice;
+
+        // Calculate new price
+        curve.currentPrice = (curve.assetReserve * 1e18) / curve.tokenReserve;
+        curve.marketCap = (curve.currentPrice * curve.tokenReserve) / 1e18;
+        curve.lastPrice = oldPrice;
+        curve.lastUpdateTime = block.timestamp;
+        
+        // Check for graduation
+        if (!curve.graduated && (curve.marketCap >= defaultConfig.gradThreshold)) {
+            _graduate(token);
+        }
+
+        // Transfer tokens to buyer
+        IERC20(token).safeTransfer(msg.sender, tokenAmount);
 
         emit Trade(
             token,
             msg.sender,
-            true,        // isBuy = true
+            true,
             tokenAmount,
-            assetAmount, // total asset spent
+            assetAmount,
             platformTaxAmount,
             creatorTaxAmount
         );
 
-        // Check graduation threshold
-        if (curve.assetReserve >= defaultConfig.gradThreshold) {
-            _graduate(token);
-        }
+        emit PriceUpdated(
+            token,
+            oldPrice,
+            curve.currentPrice,
+            curve.marketCap,
+            block.timestamp
+        );
+
+        return tokenAmount;
     }
 
+
+
     /**
-     * @notice Sell tokens back to the bonding curve with price impact protection
-     * @param token Address of the token to sell
+     * @notice Sells tokens back to the bonding curve
+     * @dev Includes tax and slippage protection
+     * @param token Address of token to sell
      * @param tokenAmount Amount of tokens to sell
-     * @return assetAmount Amount of base asset received
+     * @return assetAmount Amount of baseAsset received (after tax)
      */
     function sell(
         address token,
         uint256 tokenAmount
     ) external nonReentrant whenNotPaused returns (uint256 assetAmount) {
-        require(tokenAmount >= Constants.MIN_OPERATION_AMOUNT, Constants.ERR_ZERO_AMOUNT);
+        require(tokenAmount >= Constants.MIN_OPERATION_AMOUNT, "Amount too small");
+        require(isTokenRegistered[token], "Token not found");
 
         CurveData storage curve = curves[token];
-        require(curve.token != address(0), "Token not found");
         require(!curve.graduated, "Token graduated");
 
-        // Burn tokens from sender
-        AgentToken(token).burn(msg.sender, tokenAmount);
-
-        // Prevent underflow (explicit check)
+        // Calculate asset amount using constant product formula
+        uint256 oldK = curve.tokenReserve * curve.assetReserve;
         uint256 newTokenReserve = curve.tokenReserve + tokenAmount;
-        uint256 kOverNewReserve = Constants.BONDING_K / newTokenReserve;
-        require(
-            kOverNewReserve <= curve.assetReserve,
-            "Insufficient asset reserve"
-        );
+        uint256 newAssetReserve = oldK / newTokenReserve;
+        
+        require(newAssetReserve < curve.assetReserve, "Invalid asset calculation");
+        assetAmount = curve.assetReserve - newAssetReserve;
+        require(assetAmount > 0, "No assets to transfer");
 
-        // Calculate how many base assets returned
-        uint256 grossAssetAmount = curve.assetReserve - kOverNewReserve;
-
-        // Calculate taxes
-        uint256 totalTaxAmount = (grossAssetAmount * sellTax) / Constants.BASIS_POINTS;
+        // Calculate tax amounts
+        uint256 totalTaxAmount = (assetAmount * sellTax) / Constants.BASIS_POINTS;
         uint256 platformTaxAmount = (totalTaxAmount * Constants.PLATFORM_FEE_SHARE) /
             (Constants.PLATFORM_FEE_SHARE + Constants.CREATOR_FEE_SHARE);
         uint256 creatorTaxAmount = totalTaxAmount - platformTaxAmount;
-        uint256 netAmount = grossAssetAmount - totalTaxAmount;
+
+        // Calculate net amount after tax
+        uint256 netAmount = assetAmount - totalTaxAmount;
+        require(netAmount > 0, "Net amount after tax is zero");
+
+        // Transfer tokens from seller first
+        IERC20(token).safeTransferFrom(msg.sender, address(this), tokenAmount);
 
         // Update reserves
+        curve.assetReserve = newAssetReserve;
         curve.tokenReserve = newTokenReserve;
-        curve.assetReserve -= grossAssetAmount;
 
-        // Transfer net assets to user
-        baseAsset.safeTransfer(msg.sender, netAmount);
+        // Update price data
+        uint256 oldPrice = curve.currentPrice;
+        curve.currentPrice = (curve.assetReserve * 1e18) / curve.tokenReserve;
+        curve.marketCap = (curve.currentPrice * curve.tokenReserve) / 1e18;
+        curve.lastPrice = oldPrice;
+        curve.lastUpdateTime = block.timestamp;
 
-        // Pay out taxes
+        // Transfer assets to seller and taxes
         if (platformTaxAmount > 0) {
             baseAsset.safeTransfer(taxVault, platformTaxAmount);
         }
         if (creatorTaxAmount > 0) {
             baseAsset.safeTransfer(curve.creator, creatorTaxAmount);
         }
+        baseAsset.safeTransfer(msg.sender, netAmount);
 
         emit Trade(
             token,
             msg.sender,
-            false,           // isBuy = false
+            false,
             tokenAmount,
-            grossAssetAmount,
+            assetAmount,
             platformTaxAmount,
             creatorTaxAmount
+        );
+
+        emit PriceUpdated(
+            token,
+            oldPrice,
+            curve.currentPrice,
+            curve.marketCap,
+            block.timestamp
         );
 
         return netAmount;
     }
 
+
     // ------------------------------------------------------------------------
-    // GRADUATION LOGIC (with LP burn)
+    // GRADUATION LOGIC
     // ------------------------------------------------------------------------
 
     /**
-     * @notice Internal function to graduate a token to DEX trading
-     * @dev Splits liquidity across multiple DEXes based on weights, then burns LP tokens
-     * @param token Token to graduate
+     * @notice Returns whether a token has graduated
+     * @param token Token address
+     * @return graduated Graduation status
      */
-    function _graduate(address token) internal nonReentrant {
+    function isGraduated(address token) public view returns (bool graduated) {
+        CurveData storage curve = curves[token];
+        require(curve.token != address(0), "Token not found");
+        return curve.graduated;
+    }
+
+    /**
+     * @notice Returns DEX pairs for a graduated token
+     * @param token Token address
+     * @return pairs Array of DEX pair addresses
+     */
+    function getDexPairs(address token) public view returns (address[] memory) {
+        CurveData storage curve = curves[token];
+        require(curve.token != address(0), "Token not found");
+        return curve.dexPairs;
+    }
+
+    /**
+     * @notice Get the current state of a token including total reserves and market cap
+     * @dev For graduated tokens, this includes both bonding curve and DEX liquidity
+     * @dev The function sums up reserves from the bonding curve and all DEX pairs
+     * @dev Market cap is calculated as (total asset reserve * token price)
+     * 
+     * @param token Address of the token to check
+     * @return tokenReserve Total token reserve (bonding curve + DEX if graduated)
+     * @return assetReserve Total base asset reserve (bonding curve + DEX if graduated)
+     * @return marketCap Current total market cap in base asset terms
+     */
+    function getTokenState(address token) external view returns (
+        uint256 tokenReserve,
+        uint256 assetReserve,
+        uint256 marketCap
+    ) {
+        console.log("1. Starting getTokenState");
+        require(isTokenRegistered[token], "Token not found");
+        
+        CurveData storage curve = curves[token];
+        
+        // Get base reserves
+        tokenReserve = curve.tokenReserve;
+        assetReserve = curve.assetReserve;
+
+        console.log("2. Base reserves:", tokenReserve, assetReserve);
+        console.log("3. Graduated status:", curve.graduated);
+        
+        // Add DEX reserves if graduated
+        if (curve.graduated && curve.dexPairs.length > 0) {
+            console.log("4. Checking DEX pair");
+            address pair = curve.dexPairs[0];
+            console.log("5. DEX pair address:", pair);
+
+            // First verify pair exists
+            if (pair != address(0)) {
+                // Get token ordering
+                address token0;
+                try IDEXPair(pair).token0() returns (address _token0) {
+                    token0 = _token0;
+                    console.log("6. Got token0:", token0);
+                } catch {
+                    console.log("6. Failed to get token0");
+                    // Continue with just base reserves
+                    marketCap = assetReserve;
+                    return (tokenReserve, assetReserve, marketCap);
+                }
+
+                // Get reserves if token0 call succeeded
+                try IDEXPair(pair).getReserves() returns (
+                    uint112 reserve0,
+                    uint112 reserve1,
+                    uint32
+                ) {
+                    console.log("7. Got reserves:", reserve0, reserve1);
+                    
+                    // Add reserves based on token order
+                    if (token0 == token) {
+                        tokenReserve += reserve0;
+                        assetReserve += reserve1;
+                    } else {
+                        tokenReserve += reserve1;
+                        assetReserve += reserve0;
+                    }
+                    console.log("8. Updated reserves:", tokenReserve, assetReserve);
+                } catch {
+                    console.log("7. Failed to get reserves");
+                    // Continue with just base reserves
+                }
+            }
+        }
+
+        marketCap = assetReserve;
+        console.log("9. Final values:", tokenReserve, assetReserve, marketCap);
+
+        return (tokenReserve, assetReserve, marketCap);
+    }
+
+    /**
+     * @notice Get total reserves including both internal and DEX liquidity
+     * @param token Address of the token
+     * @return tokenReserve Total token reserve
+     * @return assetReserve Total asset reserve
+     */
+    function getTotalReserves(address token) public view returns (uint256 tokenReserve, uint256 assetReserve) {
+        CurveData storage curve = curves[token];
+        
+        // Start with internal reserves
+        tokenReserve = curve.tokenReserve;
+        assetReserve = curve.assetReserve;
+        
+        // If graduated, add DEX reserves
+        if (curve.graduated && curve.dexPairs.length > 0) {
+            for (uint256 i = 0; i < curve.dexPairs.length; i++) {
+                address pair = curve.dexPairs[i];
+                if (pair != address(0)) {
+                    try IDEXPair(pair).getReserves() returns (uint112 reserve0, uint112 reserve1, uint32) {
+                        address token0 = IDEXPair(pair).token0();
+                        if (token0 == token) {
+                            tokenReserve += reserve0;
+                            assetReserve += reserve1;
+                        } else {
+                            tokenReserve += reserve1;
+                            assetReserve += reserve0;
+                        }
+                    } catch {
+                        // Skip if we can't read reserves
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * @notice Returns the array of DEX adapters from default config
+     * @return Array of DEX adapter addresses
+     */
+    function getDEXAdapters() external view returns (address[] memory) {
+        return defaultConfig.dexAdapters;
+    }
+
+    /**
+     * @notice Graduates a token to external DEX liquidity
+     * @dev Creates pairs and adds liquidity on configured DEXes
+     * @param token Address of the token to graduate
+     */
+    function _graduate(address token) internal {
         CurveData storage curve = curves[token];
         require(!curve.graduated, "Already graduated");
+        require(curve.assetReserve >= defaultConfig.gradThreshold, "Threshold not met");
 
-        // STEP 1: Update state FIRST (Checks-Effects-Interactions)
-        curve.graduated = true;
-        
-        uint256[] memory amounts = new uint256[](defaultConfig.dexAdapters.length);
+        // Validate DEX configuration
+        uint256 totalWeight = 0;
+        for (uint256 i = 0; i < defaultConfig.dexWeights.length; i++) {
+            totalWeight += defaultConfig.dexWeights[i];
+        }
+        require(totalWeight == 100, "Weights must sum to 100");
+        require(defaultConfig.dexWeights.length == defaultConfig.dexAdapters.length, "Mismatched weights and adapters");
+
+        // Get actual balances
+        uint256 actualTokenBalance = IERC20(token).balanceOf(address(this));
+        uint256 actualAssetBalance = baseAsset.balanceOf(address(this));
+
+        console.log("=== Pre-Sync State ===");
+        console.log("Curve Reserves:");
+        console.log("- Token reserve:", curve.tokenReserve);
+        console.log("- Asset reserve:", curve.assetReserve);
+        console.log("Actual Balances:");
+        console.log("- Token balance:", actualTokenBalance);
+        console.log("- Asset balance:", actualAssetBalance);
+        console.log("Number of DEX adapters:", defaultConfig.dexAdapters.length);
+
+        // Sync curve reserves with actual balances
+        curve.tokenReserve = actualTokenBalance;
+        curve.assetReserve = actualAssetBalance;
+
+        // Update price data after sync
+        curve.currentPrice = (curve.assetReserve * 1e18) / curve.tokenReserve;
+        curve.marketCap = (curve.currentPrice * curve.tokenReserve) / 1e18;
+        curve.lastPrice = curve.currentPrice;
+        curve.lastUpdateTime = block.timestamp;
+
         address[] memory pairs = new address[](defaultConfig.dexAdapters.length);
-        curve.dexPairs = pairs;  // Set empty array first
-
-        // Mark token's own graduation flag early
-        AgentToken(token).graduate();
-
-        // Calculate total liquidity to be distributed
-        uint256 totalAssets = curve.assetReserve;
-        uint256 totalTokens = curve.tokenReserve;
-
-        // STEP 2: External interactions AFTER state changes
+        uint256[] memory amounts = new uint256[](defaultConfig.dexAdapters.length);
+        
+        // Create all pairs first
         for (uint256 i = 0; i < defaultConfig.dexAdapters.length; i++) {
             IDEXAdapter adapter = IDEXAdapter(defaultConfig.dexAdapters[i]);
+            
+            try adapter.createPair(token, address(baseAsset)) returns (address newPair) {
+                pairs[i] = newPair;
+                console.log("Created new pair:", newPair);
+                
+                // Register pair with token contract
+                try AgentToken(token).setDexPair(newPair, true) {
+                    console.log("Registered DEX pair with token");
+                } catch Error(string memory reason) {
+                    revert(string(abi.encodePacked("Failed to register DEX pair: ", reason)));
+                }
+            } catch {
+                pairs[i] = adapter.getPair(token, address(baseAsset));
+                console.log("Using existing pair:", pairs[i]);
+                
+                // Register existing pair
+                try AgentToken(token).setDexPair(pairs[i], true) {
+                    console.log("Registered existing DEX pair with token");
+                } catch Error(string memory reason) {
+                    revert(string(abi.encodePacked("Failed to register existing DEX pair: ", reason)));
+                }
+            }
+            
+            require(pairs[i] != address(0), "Failed to create/get pair");
+        }
 
-            // Calculate weighted split
-            uint256 assetAmount = (totalAssets * defaultConfig.dexWeights[i]) / 100;
-            uint256 tokenAmount = (totalTokens * defaultConfig.dexWeights[i]) / 100;
+        // Graduate the token first
+        try AgentToken(token).graduate() {
+            console.log("Token graduated successfully");
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Token graduation failed: ", reason)));
+        }
 
-            // Approve exact amounts instead of unlimited
-            IERC20(token).safeIncreaseAllowance(adapter.getRouterAddress(), tokenAmount);
-            baseAsset.safeIncreaseAllowance(adapter.getRouterAddress(), assetAmount);
+        // Now add liquidity
+        uint256 remainingTokens = actualTokenBalance;
+        uint256 remainingAssets = actualAssetBalance;
 
-            // Add liquidity with strict slippage protection
-            (uint256 amountA, uint256 amountB, uint256 liquidity) = adapter.addLiquidity(
+        for (uint256 i = 0; i < defaultConfig.dexAdapters.length; i++) {
+            if (remainingTokens == 0 || remainingAssets == 0 || defaultConfig.dexWeights[i] == 0) {
+                continue;
+            }
+
+            IDEXAdapter adapter = IDEXAdapter(defaultConfig.dexAdapters[i]);
+            address router = adapter.getRouterAddress();
+            
+            uint256 assetAmount = (actualAssetBalance * defaultConfig.dexWeights[i]) / 100;
+            uint256 tokenAmount = (actualTokenBalance * defaultConfig.dexWeights[i]) / 100;
+            
+            assetAmount = assetAmount > remainingAssets ? remainingAssets : assetAmount;
+            tokenAmount = tokenAmount > remainingTokens ? remainingTokens : tokenAmount;
+            
+            console.log("DEX Allocation for adapter", i);
+            console.log("- Weight:", defaultConfig.dexWeights[i]);
+            console.log("- Token amount:", tokenAmount);
+            console.log("- Asset amount:", assetAmount);
+            
+            // Approve adapter
+            IERC20(token).approve(address(adapter), tokenAmount);
+            baseAsset.approve(address(adapter), assetAmount);
+            
+            try adapter.addLiquidity(
                 IDEXAdapter.LiquidityParams({
                     tokenA: token,
                     tokenB: address(baseAsset),
                     amountA: tokenAmount,
                     amountB: assetAmount,
-                    minAmountA: (tokenAmount * Constants.MAX_GRADUATION_SLIPPAGE) /
-                        Constants.BASIS_POINTS,
-                    minAmountB: (assetAmount * Constants.MAX_GRADUATION_SLIPPAGE) /
-                        Constants.BASIS_POINTS,
+                    minAmountA: (tokenAmount * 95) / 100,
+                    minAmountB: (assetAmount * 95) / 100,
                     to: address(this),
-                    deadline: block.timestamp + Constants.GRADUATION_TIMEOUT
+                    deadline: block.timestamp + 15 minutes,
+                    stable: false
                 })
-            );
-
-            // Verify minimum amounts were received
-            require(
-                amountA >= (tokenAmount * Constants.MAX_GRADUATION_SLIPPAGE) / Constants.BASIS_POINTS,
-                "Insufficient tokenA received"
-            );
-            require(
-                amountB >= (assetAmount * Constants.MAX_GRADUATION_SLIPPAGE) / Constants.BASIS_POINTS,
-                "Insufficient tokenB received"
-            );
-
-            // Get and store DEX pair address
-            address pairAddr = adapter.getPair(token, address(baseAsset));
-            pairs[i] = pairAddr;
-            amounts[i] = amountB;
-
-            // Clear approvals for safety
-            IERC20(token).safeDecreaseAllowance(adapter.getRouterAddress(), tokenAmount);
-            baseAsset.safeDecreaseAllowance(adapter.getRouterAddress(), assetAmount);
-
-            // Handle LP tokens using SafeERC20
-            if (liquidity > 0) {
-                uint256 lpBalance = IERC20(pairAddr).balanceOf(address(this));
-                if (lpBalance > 0) {
-                    // Use safeTransfer instead of transfer
-                    IERC20(pairAddr).safeTransfer(
-                        0x000000000000000000000000000000000000dEaD,
-                        lpBalance
-                    );
-                }
+            ) returns (uint256 amountA, uint256 amountB, uint256 liquidity) {
+                amounts[i] = amountB;
+                remainingTokens -= amountA;
+                remainingAssets -= amountB;
+                console.log("Liquidity added:");
+                console.log("- Token used:", amountA);
+                console.log("- Asset used:", amountB);
+                console.log("- LP tokens:", liquidity);
+                emit LiquidityAdded(token, pairs[i], amountA, amountB, liquidity);
+            } catch Error(string memory reason) {
+                console.log("Liquidity addition failed:", reason);
+                revert(string(abi.encodePacked("Liquidity addition failed: ", reason)));
             }
+
+            IERC20(token).approve(address(adapter), 0);
+            baseAsset.approve(address(adapter), 0);
         }
 
-        // Update final array of DEX pairs
+        curve.graduated = true;
         curve.dexPairs = pairs;
 
         emit TokenGraduated(token, pairs, amounts);
     }
 
+
     // ------------------------------------------------------------------------
-    // ADMIN / TAX CONFIG
+    // ADMIN CONFIGURATION
     // ------------------------------------------------------------------------
 
     /**
-     * @notice Updates tax configuration (tax vault and rates)
-     * @param registry New tax vault address
+     * @notice Updates tax configuration
+     * @param _registry New tax vault address
      * @param newBuyTax New buy tax in basis points
      * @param newSellTax New sell tax in basis points
      */
     function updateTaxConfig(
-        address registry,
+        address _registry,
         uint256 newBuyTax,
         uint256 newSellTax
     ) external onlyRole(Constants.TAX_MANAGER_ROLE) {
-        require(registry != address(0), Constants.ERR_ZERO_ADDRESS);
+        require(_registry != address(0), Constants.ERR_ZERO_ADDRESS);
         require(newBuyTax <= Constants.MAX_TAX_RATE, Constants.ERR_TAX_TOO_HIGH);
         require(newSellTax <= Constants.MAX_TAX_RATE, Constants.ERR_TAX_TOO_HIGH);
 
-        taxVault = registry;
+        taxVault = _registry;
         buyTax = newBuyTax;
         sellTax = newSellTax;
 
-        emit TaxConfigUpdated(registry, newBuyTax, newSellTax);
+        emit TaxConfigUpdated(_registry, newBuyTax, newSellTax);
+    }
+
+    /**
+     * @notice Updates the asset rate that affects curve steepness
+     * @dev This rate is currently not used in the formula, but remains in the contract
+     *      for future expansions or alternate curve logic.
+     * @param newRate New asset rate value
+     */
+    function setAssetRate(uint256 newRate) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newRate > 0, "Invalid rate");
+        uint256 oldRate = assetRate;
+        assetRate = newRate;
+        emit AssetRateUpdated(oldRate, newRate);
+    }
+
+    /**
+     * @notice Updates required initial buy amount
+     * @param newAmount New required amount
+     */
+    function setInitialBuyAmount(uint256 newAmount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newAmount > 0, "Invalid amount");
+        initialBuyAmount = newAmount;
+        emit InitialBuyAmountUpdated(newAmount);
     }
 
     /**
@@ -572,18 +880,20 @@ contract AgentBondingManager is
      */
     function setDefaultConfig(CurveConfig calldata config)
         external
-        onlyRole(Constants.TAX_MANAGER_ROLE)
+        onlyRole(DEFAULT_ADMIN_ROLE)
     {
         _validateConfig(config);
         defaultConfig = config;
     }
 
     // ------------------------------------------------------------------------
-    // VIEWS
+    // VIEW FUNCTIONS
     // ------------------------------------------------------------------------
 
     /**
      * @notice Returns current price for a token, scaled by 1e18
+     * @param token Token address
+     * @return Current token price in baseAsset
      */
     function getPrice(address token) external view returns (uint256) {
         CurveData storage curve = curves[token];
@@ -592,11 +902,57 @@ contract AgentBondingManager is
         if (curve.assetReserve == 0) {
             return 0;
         }
-        return (curve.tokenReserve * 1e18) / curve.assetReserve;
+        // Price = assetReserve / tokenReserve, scaled by 1e18
+        return (curve.assetReserve * 1e18) / curve.tokenReserve;
     }
 
     /**
-     * @notice Returns buy price for a given asset amount (hypothetical, read-only)
+     * @notice Gets complete price data for a token
+     * @param token Token address
+     * @return currentPrice Current token price
+     * @return lastPrice Last recorded price
+     * @return marketCap Current market cap
+     * @return lastUpdateTime Last update timestamp
+     */
+    function getPriceData(address token) external view returns (
+        uint256 currentPrice,
+        uint256 lastPrice,
+        uint256 marketCap,
+        uint256 lastUpdateTime
+    ) {
+        CurveData storage curve = curves[token];
+        require(curve.token != address(0), "Token not found");
+        return (
+            curve.currentPrice,
+            curve.lastPrice,
+            curve.marketCap,
+            curve.lastUpdateTime
+        );
+    }
+
+    /**
+     * @notice Calculates 24h price change in basis points
+     * @param token Token address
+     * @return Price change in basis points (e.g. 1000 = 10%)
+     */
+    function getPrice24hChange(address token) external view returns (int256) {
+        CurveData storage curve = curves[token];
+        require(curve.token != address(0), "Token not found");
+        
+        // If no update in last 24h or lastPrice == 0, return 0
+        if (curve.lastUpdateTime < block.timestamp - 24 hours || curve.lastPrice == 0) {
+            return 0;
+        }
+
+        int256 priceDiff = int256(curve.currentPrice) - int256(curve.lastPrice);
+        return (priceDiff * 10000) / int256(curve.lastPrice);
+    }
+
+    /**
+     * @notice Returns buy price for a given asset amount (hypothetical)
+     * @param token Token address
+     * @param assetAmount Amount of baseAsset tokens to spend
+     * @return tokenAmount Amount of tokens that would be received
      */
     function getBuyPrice(
         address token,
@@ -605,22 +961,29 @@ contract AgentBondingManager is
         CurveData storage curve = curves[token];
         require(curve.token != address(0), "Token not found");
 
+        // Calculate net amount after buy tax
         uint256 totalTaxAmount = (assetAmount * buyTax) / Constants.BASIS_POINTS;
         uint256 netAmount = assetAmount - totalTaxAmount;
-        uint256 newAssetReserve = curve.assetReserve + netAmount;
-        if (newAssetReserve == 0) {
-            return curve.tokenReserve;
-        }
+        if (netAmount == 0) return 0;
 
-        uint256 kOverNew = Constants.BONDING_K / newAssetReserve;
-        if (kOverNew > curve.tokenReserve) {
-            return 0; // would underflow in actual buy
-        }
-        return curve.tokenReserve - kOverNew;
+        // newAssetReserve = old assetReserve + netAmount
+        uint256 newAssetReserve = curve.assetReserve + netAmount;
+
+        // K = tokenReserve * assetReserve
+        uint256 K = curve.tokenReserve * curve.assetReserve;
+
+        // newTokenReserve = K / newAssetReserve
+        uint256 newTokenReserve = K / newAssetReserve;
+        if (newTokenReserve >= curve.tokenReserve) return 0;
+
+        return curve.tokenReserve - newTokenReserve;
     }
 
     /**
-     * @notice Returns sell price for a given token amount (hypothetical, read-only)
+     * @notice Returns sell price for a given token amount (hypothetical)
+     * @param token Token address
+     * @param tokenAmount Amount of tokens to sell
+     * @return assetAmount Amount of baseAsset tokens that would be received (after tax)
      */
     function getSellPrice(
         address token,
@@ -629,23 +992,28 @@ contract AgentBondingManager is
         CurveData storage curve = curves[token];
         require(curve.token != address(0), "Token not found");
 
+        // newTokenReserve = old tokenReserve + tokenAmount
         uint256 newTokenReserve = curve.tokenReserve + tokenAmount;
-        if (newTokenReserve == 0) {
-            return 0;
-        }
 
-        uint256 kOverNew = Constants.BONDING_K / newTokenReserve;
-        if (kOverNew > curve.assetReserve) {
-            return 0; // would underflow in actual sell
-        }
+        // K = tokenReserve * assetReserve
+        uint256 K = curve.tokenReserve * curve.assetReserve;
 
-        uint256 grossAmount = curve.assetReserve - kOverNew;
+        // newAssetReserve = K / newTokenReserve
+        uint256 newAssetReserve = K / newTokenReserve;
+        if (newAssetReserve >= curve.assetReserve) return 0;
+
+        uint256 grossAmount = curve.assetReserve - newAssetReserve;
+
+        // Subtract sell tax
         uint256 totalTaxAmount = (grossAmount * sellTax) / Constants.BASIS_POINTS;
         return grossAmount - totalTaxAmount;
     }
 
     /**
      * @notice Gets reserve values for a token
+     * @param token Token address
+     * @return tokenReserve Current token reserve
+     * @return assetReserve Current baseAsset reserve
      */
     function getReserves(
         address token
@@ -656,92 +1024,43 @@ contract AgentBondingManager is
     }
 
     /**
-     * @notice Gets expected platform/creator tax splits for a given amount
+     * @notice Calculates expected tax split for a given amount
+     * @param taxOnBuy Whether calculating for buy (true) or sell (false)
+     * @param amount Amount to calculate tax on
+     * @return platformTax Amount that goes to platform
+     * @return creatorTax Amount that goes to creator
      */
     function getTaxSplit(
         bool taxOnBuy,
         uint256 amount
     ) public view returns (uint256 platformTax, uint256 creatorTax) {
-        uint256 totalTax = (amount * (taxOnBuy ? buyTax : sellTax)) /
-            Constants.BASIS_POINTS;
+        uint256 totalTax = (amount * (taxOnBuy ? buyTax : sellTax)) / Constants.BASIS_POINTS;
         platformTax = (totalTax * Constants.PLATFORM_FEE_SHARE) /
             (Constants.PLATFORM_FEE_SHARE + Constants.CREATOR_FEE_SHARE);
         creatorTax = totalTax - platformTax;
     }
 
-    // ------------------------------------------------------------------------
-    // EMERGENCY / ADMIN
-    // ------------------------------------------------------------------------
-
     /**
-     * @notice Emergency rescue of tokens sent to contract.
-     * @dev Disallows rescuing the base asset or a non-graduated curve token.
+     * @notice Retrieves the current market capitalization of a token
+     * @dev Market cap is calculated as (current price * token reserve)
+     *      and is stored in the curve data during each trade
+     * @dev This value is used to determine if a token has reached the graduation threshold
+     * @param token The address of the token to query
+     * @return The current market capitalization in base asset terms (with 18 decimals)
+     * @custom:throws "Token not found" if the token is not registered in the system
      */
-    function rescueTokens(
-        address token,
-        address to,
-        uint256 amount
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(to != address(0), Constants.ERR_ZERO_ADDRESS);
-        require(amount > 0, Constants.ERR_ZERO_AMOUNT);
-
-        // If this token is part of a curve
-        if (curves[token].token == token) {
-            // If it has already graduated, revert
-            require(!curves[token].graduated, "Cannot rescue graduated token");
-            // Also disallow rescuing the curve token itself if not graduated
-            revert("Cannot rescue a curve token that has not graduated");
-        }
-
-        // Disallow rescuing the base asset from the contract
-        require(token != address(baseAsset), "Cannot rescue base asset");
-
-        // Otherwise, rescue is allowed
-        IERC20(token).safeTransfer(to, amount);
-    }
-
-    /**
-     * @notice Pauses all trading operations (buy/sell)
-     */
-    function pause() external onlyRole(Constants.PAUSER_ROLE) {
-        _pause();
-    }
-
-    /**
-     * @notice Unpauses all trading operations (buy/sell)
-     */
-    function unpause() external onlyRole(Constants.PAUSER_ROLE) {
-        _unpause();
-    }
-
-    /**
-     * @notice Returns total number of tokens launched
-     */
-    function totalTokens() external view returns (uint256) {
-        return tokens.length;
-    }
-
-    /**
-     * @notice Returns graduation status of a token
-     */
-    function isGraduated(address token) external view returns (bool) {
-        return curves[token].graduated;
-    }
-
-    /**
-     * @notice Returns the DEX pairs for a graduated token
-     */
-    function getDexPairs(address token) external view returns (address[] memory) {
-        require(curves[token].graduated, "Token not graduated");
-        return curves[token].dexPairs;
+    function getMarketCap(address token) external view returns (uint256) {
+        require(isTokenRegistered[token], "Token not found");
+        return curves[token].marketCap;
     }
 
     // ------------------------------------------------------------------------
-    // INTERNAL UTILITIES
+    // UTILITY FUNCTIONS
     // ------------------------------------------------------------------------
 
     /**
-     * @notice Validates the provided curve configuration
+     * @notice Validates curve configuration parameters
+     * @param config Configuration to validate
      */
     function _validateConfig(CurveConfig memory config) internal pure {
         require(
@@ -758,5 +1077,47 @@ contract AgentBondingManager is
             totalWeight += config.dexWeights[i];
         }
         require(totalWeight == Constants.MAX_WEIGHT, Constants.ERR_INVALID_WEIGHTS);
+    }
+
+    // ------------------------------------------------------------------------
+    // EMERGENCY / ADMIN FUNCTIONS
+    // ------------------------------------------------------------------------
+
+    /**
+     * @notice Emergency rescue of tokens sent to contract
+     * @dev Cannot rescue baseAsset or non-graduated curve tokens
+     * @param token Token address
+     * @param to Recipient
+     * @param amount Amount of tokens to rescue
+     */
+    function rescueTokens(
+        address token,
+        address to,
+        uint256 amount
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(to != address(0), Constants.ERR_ZERO_ADDRESS);
+        require(amount > 0, Constants.ERR_ZERO_AMOUNT);
+
+        // Validate token rescue restrictions
+        if (curves[token].token == token) {
+            require(curves[token].graduated, "Cannot rescue non-graduated token");
+        }
+        require(token != address(baseAsset), "Cannot rescue base asset");
+
+        IERC20(token).safeTransfer(to, amount);
+    }
+
+    /**
+     * @notice Pauses all trading operations
+     */
+    function pause() external onlyRole(Constants.PAUSER_ROLE) {
+        _pause();
+    }
+
+    /**
+     * @notice Unpauses all trading operations
+     */
+    function unpause() external onlyRole(Constants.PAUSER_ROLE) {
+        _unpause();
     }
 }

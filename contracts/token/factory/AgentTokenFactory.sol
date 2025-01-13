@@ -5,7 +5,6 @@ import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol"
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 import "../core/AgentBondingManager.sol";
@@ -39,7 +38,7 @@ contract AgentTokenFactory is
         address platform;  // platform admin for the token
 
         // BondingManager init args
-        address baseAsset;       // e.g. USDC
+        address baseAsset;       // e.g. ETH
         address registry;        // tax vault or registry
         address managerPlatform; // address with PLATFORM_ROLE in the manager
 
@@ -55,6 +54,11 @@ contract AgentTokenFactory is
         address managerProxy;  // The proxy for AgentBondingManager
         address tokenProxy;    // The proxy for AgentToken
     }
+    
+    /**
+     * @notice Tracks if a system has been finalized
+     */
+    mapping(address => bool) public isFinalized;
 
     // ------------------------------------------------------------------------
     // EVENTS
@@ -64,6 +68,15 @@ contract AgentTokenFactory is
         DeployedSystem deployment,
         DeploymentConfig config,
         address indexed deployer,
+        uint256 timestamp
+    );
+    
+    /**
+     * @notice Emitted when a system is finalized
+     */
+    event SystemFinalized(
+        DeployedSystem deployment,
+        address indexed finalizer,
         uint256 timestamp
     );
 
@@ -116,13 +129,7 @@ contract AgentTokenFactory is
         // --------------------------------------------------------------------
         AgentBondingManager managerImpl = new AgentBondingManager();
 
-        // Prepare the data for AgentBondingManager's initializer:
-        //   function initialize(
-        //       address _baseAsset,
-        //       address _registry,
-        //       address _platform,
-        //       CurveConfig calldata _config
-        //   ) external initializer
+        // Prepare manager initializer data
         bytes memory managerInitData = abi.encodeWithSelector(
             AgentBondingManager.initialize.selector,
             config.baseAsset,
@@ -131,7 +138,7 @@ contract AgentTokenFactory is
             config.curveConfig
         );
 
-        // Create the proxy, pointing to managerImpl, then call initialize(...)
+        // Create the proxy, pointing to managerImpl
         ERC1967Proxy managerProxy = new ERC1967Proxy(
             address(managerImpl),
             managerInitData
@@ -142,38 +149,37 @@ contract AgentTokenFactory is
         // --------------------------------------------------------------------
         AgentToken tokenImpl = new AgentToken();
 
-        // Prepare the initializer data for AgentToken:
-        //   function initialize(
-        //       string memory name_,
-        //       string memory symbol_,
-        //       address implementation,  // bondingContract
-        //       address registry,        // taxVault
-        //       address platform         // platform admin
-        //   ) external initializer
+        // Prepare token initializer data
         bytes memory tokenInitData = abi.encodeWithSelector(
             AgentToken.initialize.selector,
             config.name,
             config.symbol,
-            address(managerProxy),  // let the manager be the bondingContract
-            config.registry,        // taxVault
-            config.platform         // platform admin (for the token)
+            address(managerProxy),
+            config.registry,
+            config.platform
         );
 
-        // Create the proxy, pointing to tokenImpl, then call initialize(...)
+        // Create the proxy, pointing to tokenImpl
         ERC1967Proxy tokenProxy = new ERC1967Proxy(
             address(tokenImpl),
             tokenInitData
         );
+        
 
         // --------------------------------------------------------------------
-        // 3. Return the newly deployed proxies
+        // 3. Register the token with the manager
+        // --------------------------------------------------------------------
+        AgentBondingManager manager = AgentBondingManager(address(managerProxy));
+        manager.launchToken(address(tokenProxy));
+
+        // --------------------------------------------------------------------
+        // 4. Return the deployed addresses
         // --------------------------------------------------------------------
         DeployedSystem memory result = DeployedSystem({
             managerProxy: address(managerProxy),
             tokenProxy: address(tokenProxy)
         });
 
-        // Emit an event
         emit SystemDeployed(result, config, msg.sender, block.timestamp);
 
         return result;

@@ -16,12 +16,12 @@ import "../libraries/Constants.sol";
  *         and DEX-based trading (post-graduation). Collects taxes on buys/sells.
  *
  * @dev Key features:
- *  - Upgradeable proxy pattern
- *  - Role-based access control
- *  - Tax collection system for both bonding trades and DEX trades
- *  - Graduation mechanism
- *  - Reentrancy protection
- *  - Pausable functionality
+ *  - Upgradeable proxy pattern.
+ *  - Role-based access control.
+ *  - Tax collection system for both bonding trades and DEX trades.
+ *  - Graduation mechanism to finalize bridging from the bonding curve to external DEXes.
+ *  - Reentrancy protection and pausable functionality.
+ *  - Built to work seamlessly with 18-decimal base assets (e.g. DAI, WETH, WMODE) in the bonding manager.
  */
 contract AgentToken is 
     Initializable, 
@@ -48,15 +48,17 @@ contract AgentToken is
     /// @notice Sell tax rate in basis points (e.g., 100 = 1%)
     uint256 public sellTax;
 
-    /// @notice Mapping to track addresses exempt from paying taxes
-    /// @dev Used for system contracts and privileged addresses
+    /**
+     * @notice Mapping to track addresses exempt from paying taxes
+     * @dev Used for system contracts and privileged addresses
+     */
     mapping(address => bool) public isExcludedFromTax;
 
     /**
      * @notice Tracks known DEX pair addresses post-graduation.
      * @dev If dexPairs[someAddress] is true, then:
-     *      - Transfers from that address are treated as "buys" (tokens arriving to a user from DEX)
-     *      - Transfers to that address are treated as "sells" (user sending tokens to DEX)
+     *      - Transfers from that address are treated as "buys"
+     *      - Transfers to that address are treated as "sells"
      */
     mapping(address => bool) public dexPairs;
 
@@ -151,6 +153,7 @@ contract AgentToken is
         _grantRole(Constants.TAX_MANAGER_ROLE, msg.sender);
         _grantRole(Constants.PAUSER_ROLE, msg.sender);
         _grantRole(Constants.PLATFORM_ROLE, platform);
+        _grantRole(Constants.TAX_MANAGER_ROLE, implementation);
 
         // Store references
         bondingContract = implementation;
@@ -327,14 +330,14 @@ contract AgentToken is
         bool isSell = false;
 
         if (!isGraduated) {
-            // Pre-graduation: Check against bonding contract
+            // Pre-graduation: Check if from/to the bonding contract
             if (to == bondingContract) {
                 isSell = true;
             } else if (from == bondingContract) {
                 isBuy = true;
             }
         } else {
-            // Post-graduation: Check against DEX pairs
+            // Post-graduation: Check if from/to recognized DEX pairs
             if (dexPairs[from]) {
                 isBuy = true;
             } else if (dexPairs[to]) {
@@ -352,17 +355,17 @@ contract AgentToken is
                 uint256 creatorTaxAmount = totalTax - platformTaxAmount;
                 uint256 netAmount = value - totalTax;
 
-                // Process tax transfers first
+                // Process tax transfers
                 super._update(from, taxVault, platformTaxAmount);
                 super._update(from, creatorVault, creatorTaxAmount);
                 
-                // Then process main transfer with remaining amount
+                // Then main transfer
                 super._update(from, to, netAmount);
 
                 emit TaxCollected(from, to, platformTaxAmount, creatorTaxAmount, isBuy);
             }
         } else {
-            // No tax applicable, process normally
+            // No tax
             super._update(from, to, value);
         }
     }

@@ -57,6 +57,7 @@ library ErrorLibrary {
     /**
      * @notice Parameter validation errors
      */
+    error InvalidState(string state);
     error InvalidAddress(address addr, string param);
     error InvalidAmount(uint256 amount, string param);
     error ArrayLengthMismatch(uint256 expected, uint256 received);
