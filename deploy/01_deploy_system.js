@@ -6,11 +6,11 @@ async function main() {
 
   // Initial parameters
   const TAX_VAULT = "0x..."; // Set your tax vault address
-  const INITIAL_BUY_TAX = 500; // 5% in basis points
-  const INITIAL_SELL_TAX = 500; // 5% in basis points
+  const INITIAL_BUY_TAX = 50; // .5% in basis points
+  const INITIAL_SELL_TAX = 50; // .5% in basis points
   const INITIAL_SUPPLY = ethers.parseEther("1000000"); // 1M tokens
   const MAX_TX_PERCENT = 1; // 1% max transaction size
-  const ASSET_RATE = 3000; // Rate for asset requirements
+  const ASSET_RATE = 1000; // Rate for asset requirements
   const GRAD_THRESHOLD_PERCENT = 20; // 20% threshold for graduation
   const UNISWAP_ROUTER = "0x..."; // Set your Uniswap V2 router address
   const PAIR_TOKEN_ADDRESS = "0x..."; // Set your USDC/stable token address
