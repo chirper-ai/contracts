@@ -2,12 +2,15 @@
 // Created by chirper.build
 pragma solidity ^0.8.20;
 
+import "hardhat/console.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
+import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 
 import "./Factory.sol";
 import "./IPair.sol";
@@ -24,9 +27,12 @@ contract Manager is
     OwnableUpgradeable
 {
     using SafeERC20 for IERC20;
+    
+    /// @notice WETH address
+    IUniswapV2Router02 public uniswapRouter;
 
-    /// @notice Address where fees are sent
-    address public feeReceiver;
+    /// @notice Maximum transaction percentage (e.g. 100 = 100%)
+    uint256 public maxTxPercent;  // Renamed from maxTx
 
     /// @notice Factory contract for creating token pairs
     Factory public factory;
@@ -38,7 +44,10 @@ contract Manager is
     uint256 public initialSupply;
 
     /// @notice Fee charged for creating new agents
-    uint256 public fee;
+    uint256 public launchFeePercent;
+
+    /// @notice Address where fees are sent
+    address public launchFeeReceiver;
 
     /// @notice Constant used in bonding curve calculations
     uint256 public constant K = 3_000_000_000_000;
@@ -47,7 +56,7 @@ contract Manager is
     uint256 public assetRate;
 
     /// @notice Threshold for graduation eligibility
-    uint256 public graduationThreshold;
+    uint256 public gradThresholdPercent;
 
     /**
      * @notice Represents metrics for an agent token
@@ -106,19 +115,21 @@ contract Manager is
      * @param factoryAddress Address of the factory contract
      * @param routerAddress Address of the router contract
      * @param feeReceiverAddress Address to receive fees
-     * @param feeAmount Fee amount in basis points (1/1000)
+     * @param feePercent Fee percent
      * @param initSupply Initial token supply
      * @param assetRateValue Asset rate for calculations
-     * @param gradThreshold Threshold for graduation
+     * @param gradThresholdPercent_ Threshold percent for graduation
      */
     function initialize(
         address factoryAddress,
         address routerAddress,
         address feeReceiverAddress,
-        uint256 feeAmount,
+        uint256 feePercent,
         uint256 initSupply,
         uint256 assetRateValue,
-        uint256 gradThreshold
+        uint256 gradThresholdPercent_,
+        uint256 maxTxPercent_,
+        address uniswapRouterAddress  // Add this parameter
     ) external initializer {
         __Ownable_init(msg.sender);
         __ReentrancyGuard_init();
@@ -126,12 +137,16 @@ contract Manager is
         factory = Factory(factoryAddress);
         router = Router(routerAddress);
 
-        feeReceiver = feeReceiverAddress;
-        fee = (feeAmount * 1 ether) / 1000;
+        launchFeeReceiver = feeReceiverAddress;
+        launchFeePercent = feePercent;
 
+        uniswapRouter = IUniswapV2Router02(uniswapRouterAddress);
         initialSupply = initSupply;
         assetRate = assetRateValue;
-        graduationThreshold = gradThreshold;
+        gradThresholdPercent = gradThresholdPercent_;
+        maxTxPercent = maxTxPercent_;  // Store percentage directly
+        
+        require(maxTxPercent <= 100, "Max transaction cannot exceed 100%");
     }
 
     /**
@@ -159,20 +174,29 @@ contract Manager is
 
     /**
      * @notice Updates the graduation threshold
-     * @param newThreshold New threshold value
+     * @param newThresholdPercent New threshold value
      */
-    function setGraduationThreshold(uint256 newThreshold) external onlyOwner {
-        graduationThreshold = newThreshold;
+    function setGradThresholdPercent(uint256 newThresholdPercent) external onlyOwner {
+        gradThresholdPercent = newThresholdPercent;
     }
 
     /**
      * @notice Updates fee parameters
-     * @param newFee New fee amount
-     * @param newFeeReceiver New fee receiver address
+     * @param newFeePercent New fee percentage
+     * @param newFeeReceiverAddress New fee receiver address
      */
-    function setFee(uint256 newFee, address newFeeReceiver) external onlyOwner {
-        fee = newFee;
-        feeReceiver = newFeeReceiver;
+    function setFee(uint256 newFeePercent, address newFeeReceiverAddress) external onlyOwner {
+        launchFeePercent = newFeePercent;
+        launchFeeReceiver = newFeeReceiverAddress;
+    }
+
+    /**
+     * @notice Updates the maximum transaction amount
+     * @param maxTxPercent_ New maximum transaction percentage
+     */
+    function setMaxTxPercent(uint256 maxTxPercent_) external onlyOwner {
+        require(maxTxPercent_ <= 100, "Max transaction cannot exceed 100%");
+        maxTxPercent = maxTxPercent_;
     }
 
     /**
@@ -204,27 +228,27 @@ contract Manager is
         string memory url,
         uint256 purchaseAmount
     ) external nonReentrant returns (address token, address pair, uint256 index) {
-        require(purchaseAmount > fee, "Purchase amount below fee");
-        
         address assetToken = router.assetToken();
         require(
             IERC20(assetToken).balanceOf(msg.sender) >= purchaseAmount,
             "Insufficient funds"
         );
 
+        uint256 fee = (purchaseAmount * (launchFeePercent / 100)) / 100;
         uint256 initialPurchase = purchaseAmount - fee;
-        IERC20(assetToken).safeTransferFrom(msg.sender, feeReceiver, fee);
+        IERC20(assetToken).safeTransferFrom(msg.sender, launchFeeReceiver, fee);
         IERC20(assetToken).safeTransferFrom(
             msg.sender,
             address(this),
             initialPurchase
         );
 
+        // Pass maxTx to token constructor
         Token actualToken = new Token(
-            string.concat(name, "agent"),
+            string.concat(name, "agent"), 
             ticker,
             initialSupply,
-            type(uint256).max
+            maxTxPercent
         );
         uint256 supply = actualToken.totalSupply();
 
@@ -297,7 +321,7 @@ contract Manager is
 
         IPair pair = IPair(pairAddress);
         (uint256 reserveA, uint256 reserveB) = pair.getReserves();
-
+        
         (uint256 amount0In, uint256 amount1Out) = router.sell(
             amountIn,
             tokenAddress,
@@ -308,8 +332,7 @@ contract Manager is
             tokenAddress,
             reserveA + amount0In,
             reserveB - amount1Out,
-            amount1Out,
-            false
+            amount1Out
         );
 
         return true;
@@ -347,11 +370,17 @@ contract Manager is
             tokenAddress,
             newReserveA,
             newReserveB,
-            amount1In,
-            true
+            amount1In
         );
 
-        if (newReserveA <= graduationThreshold && agentTokens[tokenAddress].isTrading) {
+        // Check graduation conditions with safe math
+        uint256 totalSupply = IERC20(tokenAddress).totalSupply();
+        require(totalSupply > 0, "Invalid total supply");
+
+        uint256 reservePercentage = (newReserveA * 100) / totalSupply;
+        
+        // Check if we should graduate
+        if (reservePercentage <= gradThresholdPercent) {
             _graduate(tokenAddress);
         }
 
@@ -364,18 +393,16 @@ contract Manager is
      * @param newReserveA New reserve of token A
      * @param newReserveB New reserve of token B
      * @param amount Amount involved in trade
-     * @param isBuy Whether this is a buy transaction
      */
     function _updateMetrics(
         address tokenAddress,
         uint256 newReserveA,
         uint256 newReserveB,
-        uint256 amount,
-        bool isBuy
+        uint256 amount
     ) private {
         TokenData storage token = agentTokens[tokenAddress];
         uint256 duration = block.timestamp - token.metrics.lastUpdate;
-
+        
         uint256 liquidity = newReserveB * 2;
         uint256 marketCap = (token.metrics.supply * newReserveB) / newReserveA;
         uint256 price = newReserveA / newReserveB;
@@ -406,12 +433,67 @@ contract Manager is
         TokenData storage token = agentTokens[tokenAddress];
         require(token.isTrading && !token.hasGraduated, "Invalid graduation state");
 
+        // 1. Get the bonding curve pair and asset token
+        address bondingPair = factory.getPair(tokenAddress, router.assetToken());
+        address assetTokenAddr = router.assetToken();
+        
+        // 2. Get current balances from bonding curve pair
+        IPair pair = IPair(bondingPair);
+        uint256 tokenBalance = pair.balance();
+        uint256 assetBalance = pair.assetBalance();
+        require(tokenBalance > 0 && assetBalance > 0, "No liquidity to graduate");
+
+        // 3. Transfer all tokens from bonding curve to this contract
+        router.graduate(tokenAddress);
+
+        // 4. Verify we received both tokens
+        require(
+            IERC20(tokenAddress).balanceOf(address(this)) >= tokenBalance &&
+            IERC20(assetTokenAddr).balanceOf(address(this)) >= assetBalance,
+            "Failed to receive tokens"
+        );
+
+        // 5. Approve tokens for Uniswap
+        IERC20(tokenAddress).forceApprove(address(uniswapRouter), tokenBalance);
+        IERC20(assetTokenAddr).forceApprove(address(uniswapRouter), assetBalance);
+        
+        // 6. Get or create Uniswap pair
+        address uniswapFactory = uniswapRouter.factory();
+        address uniswapPair = IUniswapV2Factory(uniswapFactory).getPair(tokenAddress, assetTokenAddr);
+        
+        if (uniswapPair == address(0)) {
+            uniswapPair = IUniswapV2Factory(uniswapFactory).createPair(tokenAddress, assetTokenAddr);
+        }
+        require(uniswapPair != address(0), "Failed to get/create Uniswap pair");
+
+        // 7. Add liquidity to Uniswap
+        (uint256 amountToken, uint256 amountAsset, uint256 liquidity) = 
+            uniswapRouter.addLiquidity(
+                tokenAddress,           // tokenA
+                assetTokenAddr,         // tokenB
+                tokenBalance,           // amountADesired
+                assetBalance,           // amountBDesired
+                tokenBalance * 95 / 100, // amountAMin (5% slippage)
+                assetBalance * 95 / 100, // amountBMin (5% slippage)
+                address(0),             // LP tokens will be burned
+                block.timestamp + 3600  // 1 hour deadline
+            );
+        
+        require(
+            amountToken >= tokenBalance * 95 / 100 &&
+            amountAsset >= assetBalance * 95 / 100 &&
+            liquidity > 0,
+            "Liquidity addition failed"
+        );
+
+        // 8. Update token state
         token.isTrading = false;
         token.hasGraduated = true;
-
-        // Transfer to Uniswap implementation would go here
-        router.graduate(tokenAddress);
+        token.pair = uniswapPair;
 
         emit Graduated(tokenAddress);
     }
+
+    // Add helper function to receive ETH
+    receive() external payable {}
 }

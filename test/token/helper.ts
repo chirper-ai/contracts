@@ -1,9 +1,15 @@
 // test/setup.ts
-import { expect } from "chai";
+import { ethers, upgrades } from "hardhat";
 import { Contract } from "ethers";
 import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
-import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
-import { ethers } from "hardhat";
+import { expect } from "chai";
+import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
+
+import IUniswapV2Factory from '@uniswap/v2-core/build/IUniswapV2Factory.json';
+import IUniswapV2Router02 from '@uniswap/v2-periphery/build/IUniswapV2Router02.json';
+import WETH9 from '@uniswap/v2-periphery/build/WETH9.json';
+import UniswapV2Factory from '@uniswap/v2-core/build/UniswapV2Factory.json';
+import UniswapV2Router02 from '@uniswap/v2-periphery/build/UniswapV2Router02.json';
 
 export interface TestContext {
   owner: HardhatEthersSigner;
@@ -13,21 +19,75 @@ export interface TestContext {
   router: Contract;
   manager: Contract;
   assetToken: Contract;
+  uniswapRouter: Contract;
+  uniswapFactory: Contract;
+  weth: Contract;
+}
+
+export async function createToken(
+  context: TestContext,
+  creator: HardhatEthersSigner
+): Promise<Contract> {
+  const { manager, assetToken } = context;
+  
+  const purchaseAmount = ethers.parseEther("1000");
+  await assetToken.connect(creator).approve(await manager.getAddress(), purchaseAmount);
+  
+  const tx = await manager.connect(creator).launch(
+    "Test Agent",
+    "TEST",
+    "Test prompt",
+    "Test intention",
+    "https://test.com",
+    purchaseAmount
+  );
+  
+  const receipt = await tx.wait();
+  const event = receipt.logs.find(log => log.fragment?.name === "Launched");
+  if (!event?.args?.token) {
+    throw new Error("Launch event not found or missing token address");
+  }
+  
+  const Token = await ethers.getContractFactory("Token");
+  return Token.attach(event.args.token);
 }
 
 export async function deployFixture(): Promise<TestContext> {
   // Get signers
   const [owner, alice, bob] = await ethers.getSigners();
   
-  // Deploy Asset Token (mock USDC) first
+  // Deploy WETH
+  const WETHFactory = await ethers.getContractFactory(WETH9.abi, WETH9.bytecode);
+  const weth = await WETHFactory.deploy();
+  await weth.waitForDeployment();
+
+  // Deploy Uniswap Factory
+  const UniswapFactoryFactory = await ethers.getContractFactory(UniswapV2Factory.abi, UniswapV2Factory.bytecode);
+  const uniswapFactory = await UniswapFactoryFactory.deploy(await owner.getAddress());
+  await uniswapFactory.waitForDeployment();
+
+  // Deploy Uniswap Router
+  const UniswapRouterFactory = await ethers.getContractFactory(UniswapV2Router02.abi, UniswapV2Router02.bytecode);
+  const uniswapRouter = await UniswapRouterFactory.deploy(
+    await uniswapFactory.getAddress(),
+    await weth.getAddress()
+  );
+  await uniswapRouter.waitForDeployment();
+  
+  // Deploy Asset Token (mock USDC)
   const AssetToken = await ethers.getContractFactory("Token");
   const assetToken = await AssetToken.deploy(
     "USD Coin",
     "USDC",
-    1_000_000,  // 1M initial supply
+    100_000_000,  // 10M initial supply
     100         // 100% max transaction (no limit)
   );
   await assetToken.waitForDeployment();
+
+  // Transfer some initial tokens to test accounts
+  const initialBalance = ethers.parseEther("50000000"); // 5,000,000 USDC each
+  await assetToken.transfer(await alice.getAddress(), initialBalance);
+  await assetToken.transfer(await bob.getAddress(), initialBalance);
 
   // Deploy Factory with proper initialization
   const Factory = await ethers.getContractFactory("Factory");
@@ -50,28 +110,29 @@ export async function deployFixture(): Promise<TestContext> {
   const ADMIN_ROLE = await factory.ADMIN_ROLE();
   const CREATOR_ROLE = await factory.CREATOR_ROLE();
   
-  // Grant roles to owner if they don't already have them
   if (!await factory.hasRole(ADMIN_ROLE, await owner.getAddress())) {
     await factory.grantRole(ADMIN_ROLE, await owner.getAddress());
   }
 
-  // Now we can set the router
   await factory.setRouter(await router.getAddress());
 
-  // Deploy Manager
+  // Deploy Manager with our new Uniswap router address
   const Manager = await ethers.getContractFactory("Manager");
   const manager = await upgrades.deployProxy(Manager, [
     await factory.getAddress(),
     await router.getAddress(),
     await owner.getAddress(),  // fee receiver
-    500,  // 5% fee
+    500,        // 5% fee
     1_000_000,  // initial supply
-    100,        // asset rate
-    1000        // graduation threshold
+    10_000,     // asset rate
+    50,         // graduation threshold percent
+    100,        // 100% max transaction (no limit)
+    await uniswapRouter.getAddress()  // Use our deployed Uniswap router
   ]);
   await manager.waitForDeployment();
 
   // Setup remaining roles
+  await factory.grantRole(CREATOR_ROLE, await manager.getAddress());
   await factory.grantRole(CREATOR_ROLE, await router.getAddress());
   
   // Setup roles for router
@@ -85,38 +146,11 @@ export async function deployFixture(): Promise<TestContext> {
     factory,
     router,
     manager,
-    assetToken
+    assetToken,
+    uniswapRouter,
+    uniswapFactory,
+    weth
   };
-}
-
-export async function createToken(
-  context: TestContext,
-  creator: HardhatEthersSigner
-): Promise<Contract> {
-  const { manager, assetToken } = context;
-  
-  const purchaseAmount = ethers.parseEther("1000");
-  await assetToken.connect(creator).approve(await manager.getAddress(), purchaseAmount);
-  
-  const tx = await manager.connect(creator).launch(
-    "Test Agent",
-    "TEST",
-    "Test prompt",
-    "Test intention",
-    "https://test.com",
-    purchaseAmount
-  );
-  
-  const receipt = await tx.wait();
-  const event = receipt.events?.find(e => e.event === "Launched");
-  if (!event || !event.args) {
-    throw new Error("Launch event not found");
-  }
-  
-  const tokenAddress = event.args.token;
-  const TokenContract = await ethers.getContractFactory("Token");
-  
-  return TokenContract.attach(tokenAddress);
 }
 
 export { expect, loadFixture };

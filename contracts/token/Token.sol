@@ -76,19 +76,19 @@ contract Token is Context, IERC20, Ownable {
 
     /**
      * @notice Creates a new Agent token
-     * @param name Name of the token
-     * @param symbol Symbol of the token
+     * @param name_ Name of the token
+     * @param symbol_ Symbol of the token
      * @param initialSupply Initial supply in whole tokens
      * @param maxTxPercent Maximum transaction size as percentage
      */
     constructor(
-        string memory name,
-        string memory symbol,
+        string memory name_,
+        string memory symbol_,
         uint256 initialSupply,
         uint256 maxTxPercent
     ) Ownable(msg.sender) {
-        tokenName = name;
-        tokenSymbol = symbol;
+        tokenName = name_;
+        tokenSymbol = symbol_;
         totalTokenSupply = initialSupply * 10 ** DECIMALS;
         
         balances[_msgSender()] = totalTokenSupply;
@@ -205,16 +205,16 @@ contract Token is Context, IERC20, Ownable {
         uint256 taxRate;
         if (isPair[from]) {
             // Buy tax
-            taxRate = buyTaxRate;
+            taxRate = (buyTaxRate / 100);
         } else if (isPair[to]) {
             // Sell tax
-            taxRate = sellTaxRate;
+            taxRate = (sellTaxRate / 100);
         } else {
             // No tax on wallet transfers
             return 0;
         }
 
-        return (amount * taxRate) / 10000; // Base 10000 for basis points
+        return (amount * taxRate) / 100; // Base 100 for basis points
     }
 
     /**
