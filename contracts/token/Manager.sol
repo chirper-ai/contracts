@@ -12,13 +12,13 @@ import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol
 import "./Factory.sol";
 import "./IPair.sol";
 import "./Router.sol";
-import "./AgentToken.sol";
+import "./Token.sol";
 
 /**
- * @title AgentManager
+ * @title Manager
  * @dev Manages the lifecycle of AI agent tokens, from creation through bonding curve to graduation
  */
-contract AgentManager is
+contract Manager is
     Initializable,
     ReentrancyGuardUpgradeable,
     OwnableUpgradeable
@@ -53,7 +53,7 @@ contract AgentManager is
      * @notice Represents metrics for an agent token
      * @dev Tracks various financial and market metrics
      */
-    struct AgentTokenMetrics {
+    struct TokenMetrics {
         address token;          // Token contract address
         string name;           // Full token name
         string baseName;       // Base name without prefix
@@ -72,20 +72,20 @@ contract AgentManager is
      * @notice Represents an AI agent token
      * @dev Stores all relevant information about an agent token
      */
-    struct AgentToken {
+    struct TokenData {
         address creator;        // Creator's address
         address token;         // Token contract address
         address pair;          // Liquidity pair address
         string prompt;         // Agent's prompt/description
         string intention;      // Agent's intended purpose
         string url;           // Agent's URL
-        AgentTokenMetrics metrics; // Token metrics
+        TokenMetrics metrics; // Token metrics
         bool isTrading;       // Trading status
         bool hasGraduated;    // Graduation status
     }
 
     /// @notice Mapping of token address to agent token info
-    mapping(address => AgentToken) public agentTokens;
+    mapping(address => TokenData) public agentTokens;
 
     /// @notice Array of all agent token addresses
     address[] public agentTokenList;
@@ -220,26 +220,26 @@ contract AgentManager is
             initialPurchase
         );
 
-        AgentToken newToken = new AgentToken(
-            string.concat("fun ", name),
+        Token actualToken = new Token(
+            string.concat(name, "agent"),
             ticker,
             initialSupply,
             type(uint256).max
         );
-        uint256 supply = newToken.totalSupply();
+        uint256 supply = actualToken.totalSupply();
 
-        address newPair = factory.createPair(address(newToken), assetToken);
+        address newPair = factory.createPair(address(actualToken), assetToken);
 
-        require(approve(address(router), address(newToken), supply));
+        require(approve(address(router), address(actualToken), supply));
 
         uint256 k = ((K * 10000) / assetRate);
         uint256 liquidity = (((k * 10000 ether) / supply) * 1 ether) / 10000;
 
-        router.addInitialLiquidity(address(newToken), supply, liquidity);
+        router.addInitialLiquidity(address(actualToken), supply, liquidity);
 
-        AgentTokenMetrics memory metrics = AgentTokenMetrics({
-            token: address(newToken),
-            name: string.concat("fun ", name),
+        TokenMetrics memory metrics = TokenMetrics({
+            token: address(actualToken),
+            name: string.concat(name, "agent"),
             baseName: name,
             ticker: ticker,
             supply: supply,
@@ -252,9 +252,9 @@ contract AgentManager is
             lastUpdate: block.timestamp
         });
 
-        AgentToken memory agentToken = AgentToken({
+        TokenData memory localToken = TokenData({
             creator: msg.sender,
-            token: address(newToken),
+            token: address(actualToken),
             pair: newPair,
             prompt: prompt,
             intention: intention,
@@ -264,19 +264,19 @@ contract AgentManager is
             hasGraduated: false
         });
 
-        agentTokens[address(newToken)] = agentToken;
-        agentTokenList.push(address(newToken));
+        agentTokens[address(actualToken)] = localToken;
+        agentTokenList.push(address(actualToken));
 
         uint256 tokenIndex = agentTokenList.length;
 
-        emit Launched(address(newToken), newPair, tokenIndex);
+        emit Launched(address(actualToken), newPair, tokenIndex);
 
         // Initial purchase
         IERC20(assetToken).forceApprove(address(router), initialPurchase);
-        router.buy(initialPurchase, address(newToken), address(this));
-        newToken.transfer(msg.sender, newToken.balanceOf(address(this)));
+        router.buy(initialPurchase, address(actualToken), address(this));
+        actualToken.transfer(msg.sender, actualToken.balanceOf(address(this)));
 
-        return (address(newToken), newPair, tokenIndex);
+        return (address(actualToken), newPair, tokenIndex);
     }
 
     /**
@@ -295,7 +295,7 @@ contract AgentManager is
             router.assetToken()
         );
 
-        IFPair pair = IFPair(pairAddress);
+        IPair pair = IPair(pairAddress);
         (uint256 reserveA, uint256 reserveB) = pair.getReserves();
 
         (uint256 amount0In, uint256 amount1Out) = router.sell(
@@ -331,7 +331,7 @@ contract AgentManager is
             router.assetToken()
         );
 
-        IFPair pair = IFPair(pairAddress);
+        IPair pair = IPair(pairAddress);
         (uint256 reserveA, uint256 reserveB) = pair.getReserves();
 
         (uint256 amount1In, uint256 amount0Out) = router.buy(
@@ -373,7 +373,7 @@ contract AgentManager is
         uint256 amount,
         bool isBuy
     ) private {
-        AgentToken storage token = agentTokens[tokenAddress];
+        TokenData storage token = agentTokens[tokenAddress];
         uint256 duration = block.timestamp - token.metrics.lastUpdate;
 
         uint256 liquidity = newReserveB * 2;
@@ -403,7 +403,7 @@ contract AgentManager is
      * @param tokenAddress Address of token to graduate
      */
     function _graduate(address tokenAddress) private {
-        AgentToken storage token = agentTokens[tokenAddress];
+        TokenData storage token = agentTokens[tokenAddress];
         require(token.isTrading && !token.hasGraduated, "Invalid graduation state");
 
         token.isTrading = false;

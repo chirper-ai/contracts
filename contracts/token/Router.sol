@@ -10,7 +10,7 @@ import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol
 
 import "./Factory.sol";
 import "./IPair.sol";
-import "./AgentToken.sol";
+import "./Token.sol";
 
 /**
  * @title Router
@@ -141,7 +141,7 @@ contract Router is
         uint256 halfFee = totalFee / 2;
         
         address taxVault = factory.taxVault();
-        address tokenOwner = AgentToken(tokenAddress).owner();
+        address tokenOwner = Token(tokenAddress).owner();
         
         uint256 finalAmount = amountOut - totalFee;
 
@@ -179,7 +179,7 @@ contract Router is
         uint256 halfFee = totalFee / 2;
         
         address taxVault = factory.taxVault();
-        address tokenOwner = AgentToken(tokenAddress).owner();
+        address tokenOwner = Token(tokenAddress).owner();
         
         uint256 finalAmount = amountIn - totalFee;
 

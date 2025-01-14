@@ -7,10 +7,10 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/Context.sol";
 
 /**
- * @title AgentToken
+ * @title Token
  * @dev Implementation of the ERC20 token standard for AI agents with tax functionality
  */
-contract AgentToken is Context, IERC20, Ownable {
+contract Token is Context, IERC20, Ownable {
     /// @notice Token decimals (fixed at 18)
     uint8 private constant DECIMALS = 18;
 
