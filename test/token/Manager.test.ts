@@ -86,6 +86,99 @@ describe("Manager", function() {
       expect(Number(metrics.metrics.vol)).to.be.gt(Number(0));
       expect(Number(metrics.metrics.vol24h)).to.be.gt(Number(0));
     });
+
+    it("should maintain constant product K after buys", async function() {
+      const { manager, alice, bob, router, factory, assetToken } = context;
+      
+      // Launch a token
+      const agentToken = await createToken(context, alice);
+      
+      // Get initial reserves
+      const pair = await ethers.getContractAt("IPair", await factory.getPair(await agentToken.getAddress(), await assetToken.getAddress()));
+      const [initialReserveAgent, initialReserveAsset] = await pair.getReserves();
+      const initialK = initialReserveAgent * initialReserveAsset;
+      
+      // Execute a buy
+      const buyAmount = ethers.parseEther("100");
+      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
+      await manager.connect(bob).buy(buyAmount, await agentToken.getAddress());
+      
+      // Check reserves after buy
+      const [newReserveAgent, newReserveAsset] = await pair.getReserves();
+      const newK = newReserveAgent * newReserveAsset;
+      
+      // Allow for small rounding differences (0.1% tolerance)
+      const tolerance = initialK / 1000n;
+      expect(Number(newK)).to.be.closeTo(Number(initialK), Number(tolerance));
+    });
+
+    it("should calculate correct output amounts based on constant product formula", async function() {
+      const { manager, alice, bob, router, factory, assetToken } = context;
+      
+      // Launch a token
+      const agentToken = await createToken(context, alice);
+      
+      // Get initial reserves
+      const pair = await ethers.getContractAt("IPair", await factory.getPair(await agentToken.getAddress(), await assetToken.getAddress()));
+      const [reserveAgent, reserveAsset] = await pair.getReserves();
+      
+      // Calculate expected output using constant product formula
+      const inputAmount = ethers.parseEther("100");
+      // Account for buy tax (default is usually around 5%)
+      const taxRate = await factory.buyTax();
+      const inputAfterTax = inputAmount - (inputAmount * BigInt(taxRate)) / 10000n;
+      const expectedOutput = (reserveAgent * inputAfterTax) / (reserveAsset + inputAfterTax);
+      
+      // Execute the buy
+      await assetToken.connect(bob).approve(await router.getAddress(), inputAmount);
+      await manager.connect(bob).buy(inputAmount, await agentToken.getAddress());
+      
+      // Check actual received amount
+      const actualOutput = await agentToken.balanceOf(bob.getAddress());
+      
+      // Allow for tax deductions and small rounding differences (2% tolerance)
+      const tolerance = expectedOutput * 2n / 100n;
+      expect(Number(actualOutput)).to.be.closeTo(Number(expectedOutput), Number(tolerance));
+    });
+
+    it("should maintain price impact proportional to trade size", async function() {
+      const { manager, alice, bob, router, factory, assetToken } = context;
+      
+      // Launch a token
+      const agentToken = await createToken(context, alice);
+      
+      // Get initial state
+      const pair = await ethers.getContractAt("IPair", await factory.getPair(await agentToken.getAddress(), await assetToken.getAddress()));
+      const [initialReserveAgent, initialReserveAsset] = await pair.getReserves();
+      
+      // Calculate initial price properly scaled
+      const initialPrice = (initialReserveAsset * BigInt(1e18)) / initialReserveAgent;
+      
+      // Execute a small buy
+      const smallBuy = ethers.parseEther("10");
+      await assetToken.connect(bob).approve(await router.getAddress(), smallBuy);
+      await manager.connect(bob).buy(smallBuy, await agentToken.getAddress());
+      
+      // Get price after small buy
+      const [reserveAgent1, reserveAsset1] = await pair.getReserves();
+      const priceAfterSmallBuy = (reserveAsset1 * BigInt(1e18)) / reserveAgent1;
+      
+      // Execute a large buy (100x larger)
+      const largeBuy = ethers.parseEther("1000");
+      await assetToken.connect(bob).approve(await router.getAddress(), largeBuy);
+      await manager.connect(bob).buy(largeBuy, await agentToken.getAddress());
+      
+      // Get price after large buy
+      const [reserveAgent2, reserveAsset2] = await pair.getReserves();
+      const priceAfterLargeBuy = (reserveAsset2 * BigInt(1e18)) / reserveAgent2;
+      
+      // Calculate relative price changes
+      const smallBuyImpact = ((priceAfterSmallBuy - initialPrice) * BigInt(10000)) / initialPrice;
+      const largeBuyImpact = ((priceAfterLargeBuy - priceAfterSmallBuy) * BigInt(10000)) / priceAfterSmallBuy;
+      
+      // Large buy should have significantly more impact
+      expect(Number(largeBuyImpact)).to.be.gt(Number(smallBuyImpact));
+    });
   });
 
   describe("Graduation", function() {

@@ -50,7 +50,7 @@ contract Manager is
     address public launchFeeReceiver;
 
     /// @notice Constant used in bonding curve calculations
-    uint256 public constant K = 3_000_000_000_000;
+    uint256 public constant K = 3_000_000_000;
 
     /// @notice Rate used to calculate asset requirements
     uint256 public assetRate;
