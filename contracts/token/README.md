@@ -2,204 +2,163 @@
 
 ## Overview
 
-This repository provides a **Bonding Curve Token system** as part of the [Chirper.build](https://chirper.build) ecosystem, enabling creation of **upgradeable** tokens and managers with automated market making and **multi-DEX graduation**. Once certain thresholds are reached, liquidity is deployed to decentralized exchanges and the associated LP tokens are burned to lock liquidity.
+This repository provides a **Bonding Curve Token system** for the [Chirper.build](https://chirper.build) ecosystem, enabling the creation of AI agent tokens with automated market making and **Uniswap graduation**. Once certain thresholds are reached, liquidity automatically transitions to Uniswap V2 and the associated LP tokens are burned.
 
 ## Key Features
 
 - **Bonding Curve Logic**: Dynamic token pricing governed by supply and demand
-- **Multi-DEX Graduation**: Automated liquidity provisioning on Uniswap V2, Velodrome, etc.
-- **Configurable Parameters**: User-defined graduation thresholds, DEX weights, and tax rates
-- **Proxy Architecture**: Upgradeable design using **ERC1967** proxies and OpenZeppelin patterns
-- **Factory System**: Single function call to deploy both **AgentBondingManager** and **AgentToken** proxies
-- **Emergency Controls**: `pause()`/`unpause()` for critical operations and protected rescue mechanisms
-
-## About Chirper.build
-
-[Chirper.build](https://chirper.build) is part of the larger [Chirper.ai](https://chirper.ai) ecosystem, focusing on **DeFi innovations**. This Bonding Curve system contributes:
-- Fair distribution of tokens via bonding curves
-- Automatic transition to DEX-based liquidity
-- Simplified multi-venue liquidity management
-- Customizable tax and fee handling
+- **Uniswap V2 Graduation**: Automated liquidity transition when graduation threshold is met
+- **Configurable Parameters**: User-defined graduation thresholds, transaction limits, and tax rates
+- **Proxy Architecture**: Upgradeable design using OpenZeppelin patterns
+- **Factory System**: Efficient pair creation and management
+- **Built-in Tax System**: Configurable buy/sell taxes with split distribution
 
 ## Architecture
 
 ### Core Contracts
 
-1. **AgentToken.sol**
-   - **ERC20** implementation
-   - **Upgradeable** via ERC1967
-   - Pre-graduation **bonding-curve** integration (via `bondingContract`)
-   - Post-graduation **DEX** trading with buy/sell tax logic
-   - Admin-controlled roles for tax, pausing, etc.
+1. **Token.sol**
+   - ERC20 implementation for AI agent tokens
+   - Maximum transaction limits with exemptions
+   - Configurable buy/sell tax system with split distribution
+   - Graduation state tracking
+   - Owner-controlled tax and limit parameters
 
-2. **AgentBondingManager.sol**
-   - **Upgradeable** manager for one or more tokens
-   - Implements **bonding curve mathematics**, handling `buy()` and `sell()` with dynamic pricing
-   - **Graduation logic**: sets up liquidity on multiple DEXes and burns LP tokens
-   - Configurable tax rates and thresholds
-   - Protects reserves via pausing and rescue safeguards
+2. **Manager.sol**
+   - Manages token lifecycle from launch through graduation
+   - Implements bonding curve mathematics
+   - Handles token launches with initial liquidity
+   - Manages trading operations (buy/sell)
+   - Graduation logic with Uniswap V2 integration
+   - Configurable parameters for thresholds and rates
 
-3. **AgentTokenFactory.sol**
-   - **Upgradeable Factory** that deploys:
-     - A new **AgentBondingManager** (behind its own **ERC1967Proxy**)
-     - A new **AgentToken** (behind another **ERC1967Proxy**)
-   - Calls each contract’s initializer to set up roles, thresholds, and references
-   - Returns the addresses of the newly created proxies (`managerProxy`, `tokenProxy`)
+3. **Factory.sol**
+   - Creates and manages liquidity pairs
+   - Configurable tax parameters
+   - Role-based access control
+   - Pair tracking and enumeration
 
-### Adapters
+4. **Router.sol**
+   - Manages token swaps and liquidity operations
+   - Handles fee calculations and distribution
+   - Role-based access control
+   - Token transfer coordination
 
-1. **UniswapAdapter.sol**
-   - Integrates **Uniswap V2** for liquidity operations
-   - Handles add/remove liquidity with the manager
-   - Obtains DEX pair addresses for post-graduation
-
-2. **VelodromeAdapter.sol**
-   - Integrates **Velodrome** for stable or volatile pools
-   - Manages specialized liquidity parameters
-   - Provides pair addresses and slippage checks
+5. **Pair.sol**
+   - Manages liquidity pair operations
+   - Implements constant product formula
+   - Handles token swaps
+   - Tracks reserves and pricing
 
 ### Interfaces
 
-1. **IDEXAdapter.sol**
-   - Standardizes DEX interactions (add liquidity, get pair)
-   - Minimizes code duplication across multiple DEX integrations
+1. **IPair.sol**
+   - Standardizes pair interactions
+   - Defines required pair functionality
+   - Ensures consistent implementation
 
 ## Integration Examples
 
-### Deploying a New Manager & Token (via AgentTokenFactory)
+### Launching a New Agent Token
 
 ```solidity
-// 1. Configure deployment parameters
-AgentTokenFactory.DeploymentConfig memory config = AgentTokenFactory.DeploymentConfig({
-    // Token details
-    name: "MyAgentToken",
-    symbol: "MAT",
-    platform: 0xPlatformAddress,
+// 1. Configure parameters for token launch
+string memory name = "MyAIAgent";
+string memory ticker = "MAI";
+string memory prompt = "AI Agent description";
+string memory intention = "Agent purpose";
+string memory url = "https://example.com";
+uint256 purchaseAmount = 1000e18; // Initial purchase in asset tokens
 
-    // Manager details
-    baseAsset: 0xUSDCAddress,
-    registry: 0xTaxVaultOrRegistry,
-    managerPlatform: 0xPlatformManagerAddress, // PLATFORM_ROLE for manager
-
-    // Bonding curve config (graduation threshold, DEX adapters, weights)
-    curveConfig: AgentBondingManager.CurveConfig({
-        gradThreshold: 100_000e18,   // Example: graduate at 100k USDC in reserve
-        dexAdapters: [uniswapAdapter, velodromeAdapter],
-        dexWeights: [50, 50]        // 50% of liquidity to each DEX
-    })
-});
-
-// 2. Deploy the system via the upgradeable factory
-AgentTokenFactory.DeployedSystem memory result = factory.deploySystem(config);
-
-// 3. The returned proxies for manager & token
-address managerProxy = result.managerProxy;
-address tokenProxy = result.tokenProxy;
-
-// Both managerProxy and tokenProxy are now independently upgradeable.
-```
-
-### Creating a Bonding-Curve Token Directly in the Manager (If Needed)
-
-Alternatively, if you use **one** AgentBondingManager instance that spawns tokens without separate proxies for each new token, call:
-
-```solidity
-// (Inside AgentBondingManager)
-// Example usage:
-address newToken = agentBondingManager.launchToken(
-    "MyAgentToken",
-    "MAT",
-    0xPlatformAddress
+// 2. Launch token via Manager
+(address token, address pair, uint256 index) = manager.launch(
+    name,
+    ticker,
+    prompt,
+    intention,
+    url,
+    purchaseAmount
 );
 ```
 
-> **Note**: This approach is simpler but yields a **non-upgradeable** token unless you also wrap it in a proxy. The factory approach is recommended if every token must be upgradeable.
+### Trading Operations
 
-### Trading on Bonding Curve
-
-Once a token is deployed, trades can happen via the `AgentBondingManager`:
 ```solidity
-// Example: Buy 1000 units of baseAsset worth of tokens
+// Buy tokens
 uint256 assetAmount = 1000e18;  
-uint256 receivedTokens = AgentBondingManager(managerProxy).buy(tokenProxy, assetAmount);
+bool success = manager.buy(assetAmount, tokenAddress);
 
-// Example: Sell 500 tokens back to the curve
+// Sell tokens
 uint256 sellAmount = 500e18;    
-uint256 returnedAssets = AgentBondingManager(managerProxy).sell(tokenProxy, sellAmount);
+bool success = manager.sell(sellAmount, tokenAddress);
 ```
-
-When `assetReserve` exceeds `gradThreshold`, the manager calls `_graduate(tokenProxy)`, which:
-- Splits liquidity among configured DEXes
-- Burns the resulting LP tokens
-- Flags the token as “graduated”
 
 ## Fee Structure
 
 1. **Buy/Sell Taxes**
-   - Defined in `AgentBondingManager` and `AgentToken`
-   - Splits between **platform** and **creator** addresses
-   - Rates managed by **TAX_MANAGER_ROLE**
+   - Configurable rates via Factory
+   - Split between platform (tax vault) and token creator
+   - Applied pre/post graduation as configured
 
-2. **Graduation Liquidity**
-   - On graduation, liquidity is added to each adapter’s DEX and the LP is burned
-   - Weights determined by `dexWeights[]`
+2. **Launch Fee**
+   - Percentage of initial purchase amount
+   - Sent to configured fee receiver
+   - Set during Manager initialization
 
-## Deployment
+## Deployment Guide
 
-### 1. Deploy AgentTokenFactory
+1. Deploy and initialize contracts in order:
+   ```javascript
+   // Deploy Factory
+   const factory = await upgrades.deployProxy(Factory, [
+     taxVault,
+     buyTaxRate,
+     sellTaxRate
+   ]);
 
-If you want **every** manager-token pair to be upgradeable, first deploy the **AgentTokenFactory** itself (which can also be behind a proxy if you wish). For Hardhat:
+   // Deploy Router
+   const router = await upgrades.deployProxy(Router, [
+     factory.address,
+     assetToken
+   ]);
 
-```bash
-npx hardhat run scripts/deployAgentTokenFactory.js --network mainnet
-```
+   // Deploy Manager
+   const manager = await upgrades.deployProxy(Manager, [
+     factory.address,
+     router.address,
+     feeReceiver,
+     launchFeePercent,
+     initialSupply,
+     assetRate,
+     gradThresholdPercent,
+     maxTxPercent,
+     uniswapRouter
+   ]);
+   ```
 
-Inside your script, you might do:
-```js
-const AgentTokenFactory = await ethers.getContractFactory("AgentTokenFactory");
-const factoryProxy = await upgrades.deployProxy(AgentTokenFactory, [adminAddress], { kind: "uups" });
-await factoryProxy.deployed();
-console.log("AgentTokenFactory deployed at:", factoryProxy.address);
-```
+2. Set up roles and permissions:
+   - Grant CREATOR_ROLE to Manager in Factory
+   - Grant EXECUTOR_ROLE to Manager in Router
+   - Configure tax parameters and thresholds
 
-### 2. Deploy Each New Manager & Token Pair
-
-Use the newly deployed factory to create a **fresh** upgradeable system:
-
-```solidity
-// Example code snippet after you have a reference to factoryProxy
-AgentTokenFactory(factoryProxy).deploySystem(config);
-```
-
-The factory returns `managerProxy` and `tokenProxy` addresses, each pointing to its own upgradeable proxy instance.
-
-### 3. Configure DEX Adapters
-
-Deploy and configure your **UniswapAdapter** and **VelodromeAdapter** so the manager can interact with them. You’ll reference those adapter addresses in your `curveConfig.dexAdapters`.
-
-### 4. (Optional) Upgrade Implementation
-
-If you need to upgrade your `AgentBondingManager` or `AgentToken` logic, use your ProxyAdmin (or direct `ERC1967Proxy` calls):
-
-```bash
-npx hardhat run scripts/upgradeManager.js --network mainnet
-```
+3. Launch tokens through Manager interface
 
 ## Security Model
 
 1. **Access Control**
-   - `DEFAULT_ADMIN_ROLE` can assign/revoke roles
-   - `PAUSER_ROLE` can pause trading
-   - `TAX_MANAGER_ROLE` can update tax/fee configurations
+   - Role-based permissions (ADMIN_ROLE, CREATOR_ROLE, EXECUTOR_ROLE)
+   - Owner-controlled token parameters
+   - Protected initialization and configuration
 
-2. **Bonding Curve Integrity**
-   - Strict checks on reserves to prevent underflow
-   - Graduation triggers automatic liquidity locking
+2. **Transaction Safety**
+   - Reentrancy protection
+   - Safe token transfers via OpenZeppelin
+   - Threshold and limit checks
 
-3. **Emergency Systems**
-   - Full pausing of buy/sell operations
-   - `rescueTokens()` for non-critical tokens (never base asset or active curve tokens)
-   - Configurable tax vault and graduation settings
+3. **Bonding Curve Integrity**
+   - Constant product formula enforcement
+   - Reserve balance validation
+   - Graduation threshold monitoring
 
 ## Support
 
@@ -207,21 +166,6 @@ npx hardhat run scripts/upgradeManager.js --network mainnet
 - Documentation: [docs.chirper.build](https://docs.chirper.build)
 - Discord: [Join Chirper Community](https://discord.gg/QVFejuDNmH)
 - Twitter: [@chirperai](https://twitter.com/chirperai)
-
-## Security
-
-For any security concerns, please email **stephan@chirper.ai**. 
-
-## Audits
-
-- **Hashlock (Date: TBD)**
-
-## Acknowledgments
-
-- **OpenZeppelin Contracts** for AccessControl, Upgradeable proxies, etc.
-- **Uniswap V2** and **Velodrome** for DEX mechanics
-- **Ethereum Foundation** for supporting open-source development
-- **Chirper Community** for testing and feedback
 
 ## License
 
