@@ -74,18 +74,17 @@ export async function deployFixture(): Promise<TestContext> {
   );
   await uniswapRouter.waitForDeployment();
   
-  // Deploy Asset Token (mock USDC)
-  const AssetToken = await ethers.getContractFactory("Token");
-  const assetToken = await AssetToken.deploy(
+  // Deploy Asset Token (standard ERC20 mock USDC)
+  const MockERC20 = await ethers.getContractFactory("MockERC20");
+  const assetToken = await MockERC20.deploy(
     "USD Coin",
     "USDC",
-    100_000_000,  // 10M initial supply
-    100         // 100% max transaction (no limit)
+    ethers.parseEther("100000000") // 100M initial supply
   );
   await assetToken.waitForDeployment();
 
   // Transfer some initial tokens to test accounts
-  const initialBalance = ethers.parseEther("50000000"); // 5,000,000 USDC each
+  const initialBalance = ethers.parseEther("50000000"); // 50M USDC each
   await assetToken.transfer(await alice.getAddress(), initialBalance);
   await assetToken.transfer(await bob.getAddress(), initialBalance);
 
@@ -93,8 +92,9 @@ export async function deployFixture(): Promise<TestContext> {
   const Factory = await ethers.getContractFactory("Factory");
   const factory = await upgrades.deployProxy(Factory, [
     await owner.getAddress(),  // tax vault
-    200,  // 2% buy tax
-    300   // 3% sell tax
+    200,                       // 2% buy tax
+    300,                       // 3% sell tax
+    500                        // 5% launch tax
   ]);
   await factory.waitForDeployment();
 
@@ -116,27 +116,24 @@ export async function deployFixture(): Promise<TestContext> {
 
   await factory.setRouter(await router.getAddress());
 
-  // Deploy Manager with our new Uniswap router address
+  // Deploy Manager with proper initialization
   const Manager = await ethers.getContractFactory("Manager");
   const manager = await upgrades.deployProxy(Manager, [
     await factory.getAddress(),
     await router.getAddress(),
-    await owner.getAddress(),  // fee receiver
-    500,        // 5% fee
-    1_000_000,  // initial supply
-    10_000,     // asset rate
-    50,         // graduation threshold percent
-    100,        // 100% max transaction (no limit)
-    await uniswapRouter.getAddress()  // Use our deployed Uniswap router
+    1_000_000,              // initial supply
+    10_000,                 // asset rate
+    50,                     // graduation threshold percent
+    100,                    // 100% max transaction (no limit)
+    await uniswapRouter.getAddress()
   ]);
   await manager.waitForDeployment();
 
   // Setup remaining roles
   await factory.grantRole(CREATOR_ROLE, await manager.getAddress());
-  await factory.grantRole(CREATOR_ROLE, await router.getAddress());
   
   // Setup roles for router
-  const EXECUTOR_ROLE = ethers.keccak256(ethers.toUtf8Bytes("EXECUTOR_ROLE"));
+  const EXECUTOR_ROLE = await router.EXECUTOR_ROLE();
   await router.grantRole(EXECUTOR_ROLE, await manager.getAddress());
 
   return {

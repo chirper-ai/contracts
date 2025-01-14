@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -14,10 +13,9 @@ import "./Token.sol";
 
 /**
  * @title Router
- * @dev Manages token swaps and liquidity operations with enhanced fee distribution
- * This contract handles all swap operations, initial liquidity provision,
- * and fee calculations for the platform. It includes split fee distribution
- * between tax vault and token owners.
+ * @dev Manages token swaps and liquidity operations for the platform
+ * This contract handles all trading operations including swaps and liquidity provision,
+ * with tax management handled by the Factory contract.
  */
 contract Router is
     Initializable,
@@ -26,29 +24,41 @@ contract Router is
 {
     using SafeERC20 for IERC20;
 
-    /// @notice Role identifier for admin operations
+    /*//////////////////////////////////////////////////////////////
+                                 CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Role identifier for administrative operations
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     
     /// @notice Role identifier for execution operations
     bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
 
-    /// @notice Factory contract for creating and managing pairs
+    /*//////////////////////////////////////////////////////////////
+                            STATE VARIABLES
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Factory contract reference for pair and tax management
     Factory public factory;
     
-    /// @notice Asset token used for trading pairs
+    /// @notice Asset token used for all trading pairs
     address public assetToken;
 
-    /**
-     * @dev Prevents implementation contract initialization
-     */
+    /*//////////////////////////////////////////////////////////////
+                               CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
+
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
+    /*//////////////////////////////////////////////////////////////
+                            INITIALIZATION
+    //////////////////////////////////////////////////////////////*/
+
     /**
-     * @notice Initializes the router contract
-     * @dev Sets up initial configuration and grants admin role
+     * @notice Initializes the router contract with required dependencies
      * @param factory_ Address of the factory contract
      * @param assetToken_ Address of the asset token
      */
@@ -60,203 +70,217 @@ contract Router is
         __AccessControl_init();
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
 
-        require(factory_ != address(0), "Zero addresses not allowed");
-        require(assetToken_ != address(0), "Zero addresses not allowed");
+        require(factory_ != address(0), "Invalid factory");
+        require(assetToken_ != address(0), "Invalid asset token");
 
         factory = Factory(factory_);
         assetToken = assetToken_;
     }
 
-    /**
-     * @notice Calculates output amount for a swap operation
-     * @dev Uses constant product formula and handles both buy and sell directions
-     * @param token Token address being traded
-     * @param assetToken_ Asset token address (for direction)
-     * @param amountIn Amount of input tokens
-     * @return _amountOut Amount of output tokens
-     */
-    function getAmountsOut(
-        address token,
-        address assetToken_,
-        uint256 amountIn
-    ) public view returns (uint256 _amountOut) {
-        require(token != address(0), "Zero addresses not allowed");
-
-        address pairAddress = factory.getPair(token, assetToken);
-        IPair pair = IPair(pairAddress);
-        
-        (uint256 reserveA, uint256 reserveB) = pair.getReserves();
-        uint256 k = pair.kLast();
-        
-        uint256 amountOut;
-
-        if (assetToken_ == assetToken) {
-            uint256 newReserveB = reserveB + amountIn;
-            uint256 newReserveA = k / newReserveB;
-            amountOut = reserveA - newReserveA;
-        } else {
-            uint256 newReserveA = reserveA + amountIn;
-            uint256 newReserveB = k / newReserveA;
-            amountOut = reserveB - newReserveB;
-        }
-
-        return amountOut;
-    }
+    /*//////////////////////////////////////////////////////////////
+                         CORE TRADING FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Adds initial liquidity to a trading pair
-     * @dev Only callable by executors, sets up initial trading state
-     * @param tokenAddress Token address
-     * @param amountToken_ Amount of tokens to add
-     * @param amountAsset_ Amount of asset tokens to add
-     * @return Tuple of token and asset amounts added
-     */
-    function addInitialLiquidity(
-        address tokenAddress,
-        uint256 amountToken_,
-        uint256 amountAsset_
-    ) external onlyRole(EXECUTOR_ROLE) returns (uint256, uint256) {
-        require(tokenAddress != address(0), "Zero addresses not allowed");
-
-        address pairAddress = factory.getPair(tokenAddress, assetToken);
-        IPair pair = IPair(pairAddress);
-
-        IERC20(tokenAddress).safeTransferFrom(msg.sender, pairAddress, amountToken_);
-        pair.mint(amountToken_, amountAsset_);
-
-        return (amountToken_, amountAsset_);
-    }
-
-    /**
-     * @notice Executes a sell operation with split fee distribution
-     * @dev Handles token transfers and fee calculations
-     * @param amountIn Amount of tokens to sell
-     * @param tokenAddress Address of token being sold
-     * @param to Address receiving the output
-     * @return Tuple of input and output amounts
-     */
-    function sell(
-        uint256 amountIn,
-        address tokenAddress,
-        address to
-    ) external nonReentrant onlyRole(EXECUTOR_ROLE) returns (uint256, uint256) {
-        require(tokenAddress != address(0), "Zero addresses not allowed");
-        require(to != address(0), "Zero addresses not allowed");
-        
-        // Check token hasn't graduated
-        Token token = Token(tokenAddress);
-        require(!token.hasGraduated(), "Token graduated");
-
-        address pairAddress = factory.getPair(tokenAddress, assetToken);
-        IPair pair = IPair(pairAddress);
-        
-        uint256 amountOut = getAmountsOut(tokenAddress, address(0), amountIn);
-        IERC20(tokenAddress).safeTransferFrom(to, pairAddress, amountIn);
-
-        // Calculate split fees
-        uint256 fee = factory.sellTax() / 100;
-        uint256 totalFee = (fee * amountOut) / 100;
-        uint256 halfFee = totalFee / 2;
-        uint256 finalAmount = amountOut - totalFee;
-        
-        address taxVault = factory.taxVault();
-        address tokenOwner = Token(tokenAddress).owner();
-
-        // Distribute fees and transfer tokens
-        pair.transferAsset(to, finalAmount);
-        pair.transferAsset(taxVault, halfFee);
-        pair.transferAsset(tokenOwner, halfFee);
-        
-        pair.swap(amountIn, 0, 0, amountOut);
-
-        return (amountIn, amountOut);
-    }
-
-    /**
-     * @notice Executes a buy operation with split fee distribution
-     * @dev Handles token transfers and fee calculations
-     * @param amountIn Amount of asset tokens to spend
-     * @param tokenAddress Address of token to buy
-     * @param to Address receiving the output
-     * @return Tuple of input and output amounts
+     * @notice Executes a buy operation with fee distribution
+     * @param amountIn_ Amount of asset tokens to spend
+     * @param tokenAddress_ Address of token to buy
+     * @param to_ Address receiving the output tokens
+     * @return Tuple of (input amount, output amount)
      */
     function buy(
-        uint256 amountIn,
-        address tokenAddress,
-        address to
+        uint256 amountIn_,
+        address tokenAddress_,
+        address to_
     ) external onlyRole(EXECUTOR_ROLE) nonReentrant returns (uint256, uint256) {
-        require(tokenAddress != address(0), "Zero addresses not allowed");
-        require(to != address(0), "Zero addresses not allowed");
-        require(amountIn > 0, "Amount must be positive");
+        require(tokenAddress_ != address(0), "Invalid token");
+        require(to_ != address(0), "Invalid recipient");
+        require(amountIn_ > 0, "Invalid amount");
         
         // Check token hasn't graduated
-        Token token = Token(tokenAddress);
+        Token token = Token(tokenAddress_);
         require(!token.hasGraduated(), "Token graduated");
 
-        address pair = factory.getPair(tokenAddress, assetToken);
+        address pair = factory.getPair(tokenAddress_, assetToken);
 
-        // Calculate split fees
-        uint256 feePercent = factory.buyTax() / 100;
-        uint256 totalFee = (feePercent * amountIn) / 100;
+        // Calculate split fees using Factory's tax settings
+        uint256 feePercent = factory.buyTax();
+        uint256 totalFee = (feePercent * amountIn_) / 10000;
         uint256 halfFee = totalFee / 2;
-        uint256 finalAmount = amountIn - totalFee;
+        uint256 finalAmount = amountIn_ - totalFee;
         
         address taxVault = factory.taxVault();
-        address tokenOwner = Token(tokenAddress).owner();
+        address tokenOwner = token.owner();
 
         // Transfer tokens with split fees
-        IERC20(assetToken).safeTransferFrom(to, pair, finalAmount);
-        IERC20(assetToken).safeTransferFrom(to, taxVault, halfFee);
-        IERC20(assetToken).safeTransferFrom(to, tokenOwner, halfFee);
+        IERC20(assetToken).safeTransferFrom(to_, pair, finalAmount);
+        IERC20(assetToken).safeTransferFrom(to_, taxVault, halfFee);
+        IERC20(assetToken).safeTransferFrom(to_, tokenOwner, halfFee);
 
-        uint256 amountOut = getAmountsOut(tokenAddress, assetToken, finalAmount);
+        uint256 amountOut = _getAmountsOut(tokenAddress_, assetToken, finalAmount);
 
-        IPair(pair).transferTo(to, amountOut);
+        IPair(pair).transferTo(to_, amountOut);
         IPair(pair).swap(0, amountOut, finalAmount, 0);
 
         return (finalAmount, amountOut);
     }
 
     /**
-     * @notice Graduates a token pair
-     * @dev Transfers asset balance to caller, only executable by EXECUTOR_ROLE
-     * @param tokenAddress Address of token to graduate
+     * @notice Executes a sell operation with fee distribution
+     * @param amountIn_ Amount of tokens to sell
+     * @param tokenAddress_ Address of token being sold
+     * @param to_ Address receiving the output assets
+     * @return Tuple of (input amount, output amount)
      */
-    function graduate(
-        address tokenAddress
-    ) external onlyRole(EXECUTOR_ROLE) nonReentrant {
-        require(tokenAddress != address(0), "Zero addresses not allowed");
+    function sell(
+        uint256 amountIn_,
+        address tokenAddress_,
+        address to_
+    ) external nonReentrant onlyRole(EXECUTOR_ROLE) returns (uint256, uint256) {
+        require(tokenAddress_ != address(0), "Invalid token");
+        require(to_ != address(0), "Invalid recipient");
         
         // Check token hasn't graduated
-        Token token = Token(tokenAddress);
+        Token token = Token(tokenAddress_);
+        require(!token.hasGraduated(), "Token graduated");
+
+        address pairAddress = factory.getPair(tokenAddress_, assetToken);
+        IPair pair = IPair(pairAddress);
+        
+        uint256 amountOut = _getAmountsOut(tokenAddress_, address(0), amountIn_);
+        IERC20(tokenAddress_).safeTransferFrom(to_, pairAddress, amountIn_);
+
+        // Calculate split fees using Factory's tax settings
+        uint256 fee = factory.sellTax();
+        uint256 totalFee = (fee * amountOut) / 10000;
+        uint256 halfFee = totalFee / 2;
+        uint256 finalAmount = amountOut - totalFee;
+        
+        address taxVault = factory.taxVault();
+        address tokenOwner = token.owner();
+
+        // Distribute fees and transfer tokens
+        pair.transferAsset(to_, finalAmount);
+        pair.transferAsset(taxVault, halfFee);
+        pair.transferAsset(tokenOwner, halfFee);
+        
+        pair.swap(amountIn_, 0, 0, amountOut);
+
+        return (amountIn_, amountOut);
+    }
+
+    /**
+     * @notice Adds initial liquidity to a trading pair
+     * @param tokenAddress_ Token address to add liquidity for
+     * @param amountToken_ Amount of tokens to add
+     * @param amountAsset_ Amount of asset tokens to add
+     * @return Tuple of (token amount, asset amount) added
+     */
+    function addInitialLiquidity(
+        address tokenAddress_,
+        uint256 amountToken_,
+        uint256 amountAsset_
+    ) external onlyRole(EXECUTOR_ROLE) returns (uint256, uint256) {
+        require(tokenAddress_ != address(0), "Invalid token");
+
+        address pairAddress = factory.getPair(tokenAddress_, assetToken);
+        IPair pair = IPair(pairAddress);
+
+        IERC20(tokenAddress_).safeTransferFrom(msg.sender, pairAddress, amountToken_);
+        pair.mint(amountToken_, amountAsset_);
+
+        return (amountToken_, amountAsset_);
+    }
+
+    /**
+     * @notice Graduates a token pair to external AMM
+     * @param tokenAddress_ Address of token to graduate
+     */
+    function graduate(
+        address tokenAddress_
+    ) external onlyRole(EXECUTOR_ROLE) nonReentrant {
+        require(tokenAddress_ != address(0), "Invalid token");
+        
+        Token token = Token(tokenAddress_);
         require(!token.hasGraduated(), "Token graduated");
         
-        address pair = factory.getPair(tokenAddress, assetToken);
+        address pair = factory.getPair(tokenAddress_, assetToken);
         
-        // Get both balances
         uint256 assetBalance = IPair(pair).assetBalance();
         uint256 agentBalance = IPair(pair).balance();
         
-        // Transfer both tokens to caller
         IPair(pair).transferAsset(msg.sender, assetBalance);
         IPair(pair).transferTo(msg.sender, agentBalance);
     }
 
+    /*//////////////////////////////////////////////////////////////
+                            VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Calculates output amount for a swap operation
+     * @param token_ Token address being traded
+     * @param assetToken_ Asset token address for direction
+     * @param amountIn_ Amount of input tokens
+     * @return Amount of output tokens
+     */
+    function getAmountsOut(
+        address token_,
+        address assetToken_,
+        uint256 amountIn_
+    ) external view returns (uint256) {
+        return _getAmountsOut(token_, assetToken_, amountIn_);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         INTERNAL FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Internal function to calculate swap amounts
+     * @param token_ Token address being traded
+     * @param assetToken_ Asset token address for direction
+     * @param amountIn_ Amount of input tokens
+     * @return Amount of output tokens
+     */
+    function _getAmountsOut(
+        address token_,
+        address assetToken_,
+        uint256 amountIn_
+    ) internal view returns (uint256) {
+        require(token_ != address(0), "Invalid token");
+
+        address pairAddress = factory.getPair(token_, assetToken);
+        IPair pair = IPair(pairAddress);
+        
+        (uint256 reserveA, uint256 reserveB) = pair.getReserves();
+        uint256 k = pair.kLast();
+        
+        if (assetToken_ == assetToken) {
+            uint256 newReserveB = reserveB + amountIn_;
+            uint256 newReserveA = k / newReserveB;
+            return reserveA - newReserveA;
+        } else {
+            uint256 newReserveA = reserveA + amountIn_;
+            uint256 newReserveB = k / newReserveA;
+            return reserveB - newReserveB;
+        }
+    }
+
     /**
      * @notice Approves token spending for a pair
-     * @dev Only callable by executors
-     * @param pair Address of the pair
-     * @param asset Address of the asset
-     * @param spender Address allowed to spend
-     * @param amount Amount to approve
+     * @param pair_ Address of the pair
+     * @param asset_ Address of the asset
+     * @param spender_ Address allowed to spend
+     * @param amount_ Amount to approve
      */
-    function approval(
-        address pair,
-        address asset,
-        address spender,
-        uint256 amount
+    function approve(
+        address pair_,
+        address asset_,
+        address spender_,
+        uint256 amount_
     ) external onlyRole(EXECUTOR_ROLE) nonReentrant {
-        require(spender != address(0), "Zero addresses not allowed");
-        IPair(pair).approval(spender, asset, amount);
+        require(spender_ != address(0), "Invalid spender");
+        IPair(pair_).approval(spender_, asset_, amount_);
     }
 }

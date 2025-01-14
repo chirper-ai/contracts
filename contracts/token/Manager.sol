@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-// Created by chirper.build
 pragma solidity ^0.8.20;
 
 import "hardhat/console.sol";
@@ -19,7 +18,8 @@ import "./Token.sol";
 
 /**
  * @title Manager
- * @dev Manages the lifecycle of AI agent tokens, from creation through bonding curve to graduation
+ * @dev Manages the lifecycle of AI agent tokens, including creation, bonding curve trading, and graduation
+ * This contract coordinates with Factory for tax management and Router for trading operations
  */
 contract Manager is
     Initializable,
@@ -27,234 +27,220 @@ contract Manager is
     OwnableUpgradeable
 {
     using SafeERC20 for IERC20;
-    
-    /// @notice WETH address
+
+    /*//////////////////////////////////////////////////////////////
+                                 CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Bonding curve constant used in price calculations
+    uint256 public constant K = 3_000_000_000;
+
+    /*//////////////////////////////////////////////////////////////
+                            STATE VARIABLES
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Uniswap V2 Router contract interface
     IUniswapV2Router02 public uniswapRouter;
 
-    /// @notice Maximum transaction percentage (e.g. 100 = 100%)
-    uint256 public maxTxPercent;  // Renamed from maxTx
+    /// @notice Maximum transaction percentage (1-100)
+    uint256 public maxTxPercent;
 
     /// @notice Factory contract for creating token pairs
     Factory public factory;
 
-    /// @notice Router contract for token operations
+    /// @notice Router contract for token trading operations
     Router public router;
 
-    /// @notice Initial supply for new agent tokens
+    /// @notice Initial token supply for new agent tokens
     uint256 public initialSupply;
 
-    /// @notice Fee charged for creating new agents
-    uint256 public launchFeePercent;
-
-    /// @notice Address where fees are sent
-    address public launchFeeReceiver;
-
-    /// @notice Constant used in bonding curve calculations
-    uint256 public constant K = 3_000_000_000;
-
-    /// @notice Rate used to calculate asset requirements
+    /// @notice Rate used in asset requirement calculations
     uint256 public assetRate;
 
-    /// @notice Threshold for graduation eligibility
+    /// @notice Percentage threshold required for graduation eligibility
     uint256 public gradThresholdPercent;
 
+    /*//////////////////////////////////////////////////////////////
+                                  STRUCTS
+    //////////////////////////////////////////////////////////////*/
+
     /**
-     * @notice Represents metrics for an agent token
-     * @dev Tracks various financial and market metrics
+     * @notice Comprehensive metrics tracking for an agent token
+     * @param token Address of the token contract
+     * @param name Full name of the token including "agent" suffix
+     * @param baseName Original name without suffix
+     * @param ticker Trading symbol for the token
+     * @param supply Total token supply
+     * @param price Current token price
+     * @param mktCap Market capitalization
+     * @param liq Total liquidity
+     * @param vol Lifetime trading volume
+     * @param vol24h Rolling 24-hour trading volume
+     * @param lastPrice Price at last update
+     * @param lastUpdate Timestamp of last metrics update
      */
     struct TokenMetrics {
-        address token;          // Token contract address
-        string name;           // Full token name
-        string baseName;       // Base name without prefix
-        string ticker;         // Token ticker symbol
-        uint256 supply;        // Total token supply
-        uint256 price;         // Current token price
-        uint256 mktCap;        // Market capitalization
-        uint256 liq;           // Liquidity
-        uint256 vol;           // Total volume
-        uint256 vol24h;        // 24-hour volume
-        uint256 lastPrice;     // Previous price
-        uint256 lastUpdate;    // Last update timestamp
+        address token;
+        string name;
+        string baseName;
+        string ticker;
+        uint256 supply;
+        uint256 price;
+        uint256 mktCap;
+        uint256 liq;
+        uint256 vol;
+        uint256 vol24h;
+        uint256 lastPrice;
+        uint256 lastUpdate;
     }
 
     /**
-     * @notice Represents an AI agent token
-     * @dev Stores all relevant information about an agent token
+     * @notice Comprehensive data structure for an AI agent token
+     * @param creator Address that created the token
+     * @param token Address of the token contract
+     * @param pair Address of the primary trading pair
+     * @param prompt Description of the agent's behavior
+     * @param intention Stated purpose of the agent
+     * @param url Reference URL for the agent
+     * @param metrics Current token metrics
+     * @param isTrading Whether trading is currently enabled
+     * @param hasGraduated Whether token has graduated to Uniswap
      */
     struct TokenData {
-        address creator;        // Creator's address
-        address token;         // Token contract address
-        address pair;          // Liquidity pair address
-        string prompt;         // Agent's prompt/description
-        string intention;      // Agent's intended purpose
-        string url;           // Agent's URL
-        TokenMetrics metrics; // Token metrics
-        bool isTrading;       // Trading status
-        bool hasGraduated;    // Graduation status
+        address creator;
+        address token;
+        address pair;
+        string prompt;
+        string intention;
+        string url;
+        TokenMetrics metrics;
+        bool isTrading;
+        bool hasGraduated;
     }
 
-    /// @notice Mapping of token address to agent token info
+    /*//////////////////////////////////////////////////////////////
+                                MAPPINGS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Mapping from token address to its complete data
     mapping(address => TokenData) public agentTokens;
 
-    /// @notice Array of all agent token addresses
+    /// @notice List of all agent token addresses
     address[] public agentTokenList;
 
-    /// @notice Emitted when a new agent token is launched
+    /*//////////////////////////////////////////////////////////////
+                                 EVENTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Emitted when a new agent token is created
     event Launched(address indexed token, address indexed pair, uint256 index);
 
-    /// @notice Emitted when an agent token graduates
+    /// @notice Emitted when an agent token graduates to Uniswap
     event Graduated(address indexed token);
+
+    /*//////////////////////////////////////////////////////////////
+                               CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
+    /*//////////////////////////////////////////////////////////////
+                            INITIALIZATION
+    //////////////////////////////////////////////////////////////*/
+
     /**
-     * @notice Initializes the contract
-     * @param factoryAddress Address of the factory contract
-     * @param routerAddress Address of the router contract
-     * @param feeReceiverAddress Address to receive fees
-     * @param feePercent Fee percent
-     * @param initSupply Initial token supply
-     * @param assetRateValue Asset rate for calculations
-     * @param gradThresholdPercent_ Threshold percent for graduation
+     * @notice Initializes the Manager contract with required parameters
+     * @param factory_ Address of the Factory contract
+     * @param router_ Address of the Router contract
+     * @param initSupply_ Initial token supply
+     * @param assetRateValue_ Asset rate for calculations
+     * @param gradThresholdPercent_ Graduation threshold percentage
+     * @param maxTxPercent_ Maximum transaction percentage
+     * @param uniswapRouterAddress_ Address of Uniswap V2 Router
      */
     function initialize(
-        address factoryAddress,
-        address routerAddress,
-        address feeReceiverAddress,
-        uint256 feePercent,
-        uint256 initSupply,
-        uint256 assetRateValue,
+        address factory_,
+        address router_,
+        uint256 initSupply_,
+        uint256 assetRateValue_,
         uint256 gradThresholdPercent_,
         uint256 maxTxPercent_,
-        address uniswapRouterAddress  // Add this parameter
+        address uniswapRouterAddress_
     ) external initializer {
         __Ownable_init(msg.sender);
         __ReentrancyGuard_init();
-
-        factory = Factory(factoryAddress);
-        router = Router(routerAddress);
-
-        launchFeeReceiver = feeReceiverAddress;
-        launchFeePercent = feePercent;
-
-        uniswapRouter = IUniswapV2Router02(uniswapRouterAddress);
-        initialSupply = initSupply;
-        assetRate = assetRateValue;
-        gradThresholdPercent = gradThresholdPercent_;
-        maxTxPercent = maxTxPercent_;  // Store percentage directly
         
-        require(maxTxPercent <= 100, "Max transaction cannot exceed 100%");
-    }
-
-    /**
-     * @notice Approves spending of tokens
-     * @param spender Address to approve
-     * @param tokenAddress Token to approve
-     * @param amount Amount to approve
-     */
-    function approve(
-        address spender,
-        address tokenAddress,
-        uint256 amount
-    ) internal returns (bool) {
-        IERC20(tokenAddress).forceApprove(spender, amount);
-        return true;
-    }
-
-    /**
-     * @notice Updates the initial supply
-     * @param newSupply New initial supply value
-     */
-    function setInitialSupply(uint256 newSupply) external onlyOwner {
-        initialSupply = newSupply;
-    }
-
-    /**
-     * @notice Updates the graduation threshold
-     * @param newThresholdPercent New threshold value
-     */
-    function setGradThresholdPercent(uint256 newThresholdPercent) external onlyOwner {
-        gradThresholdPercent = newThresholdPercent;
-    }
-
-    /**
-     * @notice Updates fee parameters
-     * @param newFeePercent New fee percentage
-     * @param newFeeReceiverAddress New fee receiver address
-     */
-    function setFee(uint256 newFeePercent, address newFeeReceiverAddress) external onlyOwner {
-        launchFeePercent = newFeePercent;
-        launchFeeReceiver = newFeeReceiverAddress;
-    }
-
-    /**
-     * @notice Updates the maximum transaction amount
-     * @param maxTxPercent_ New maximum transaction percentage
-     */
-    function setMaxTxPercent(uint256 maxTxPercent_) external onlyOwner {
         require(maxTxPercent_ <= 100, "Max transaction cannot exceed 100%");
+        require(factory_ != address(0), "Invalid factory");
+        require(router_ != address(0), "Invalid router");
+
+        factory = Factory(factory_);
+        router = Router(router_);
+        initialSupply = initSupply_;
+        assetRate = assetRateValue_;
+        gradThresholdPercent = gradThresholdPercent_;
         maxTxPercent = maxTxPercent_;
+        uniswapRouter = IUniswapV2Router02(uniswapRouterAddress_);
     }
 
-    /**
-     * @notice Updates the asset rate
-     * @param newRate New asset rate value
-     */
-    function setAssetRate(uint256 newRate) external onlyOwner {
-        require(newRate > 0, "Rate must be positive");
-        assetRate = newRate;
-    }
+    /*//////////////////////////////////////////////////////////////
+                         CORE TRADING FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Launches a new agent token
-     * @param name Token name
-     * @param ticker Token ticker
-     * @param prompt Agent's prompt
-     * @param intention Agent's intention
-     * @param url Agent's URL
-     * @param purchaseAmount Initial purchase amount
+     * @notice Creates and launches a new agent token
+     * @param name_ Base name for the token
+     * @param ticker_ Trading symbol
+     * @param prompt_ Agent's behavioral description
+     * @param intention_ Agent's purpose
+     * @param url_ Reference URL
+     * @param purchaseAmount_ Initial purchase amount
      * @return token Token address
      * @return pair Pair address
-     * @return index Token index
+     * @return index Token index in list
      */
     function launch(
-        string memory name,
-        string memory ticker,
-        string memory prompt,
-        string memory intention,
-        string memory url,
-        uint256 purchaseAmount
+        string memory name_,
+        string memory ticker_,
+        string memory prompt_,
+        string memory intention_,
+        string memory url_,
+        uint256 purchaseAmount_
     ) external nonReentrant returns (address token, address pair, uint256 index) {
-        address assetToken = router.assetToken();
+        address assetToken_ = router.assetToken();
         require(
-            IERC20(assetToken).balanceOf(msg.sender) >= purchaseAmount,
+            IERC20(assetToken_).balanceOf(msg.sender) >= purchaseAmount_,
             "Insufficient funds"
         );
 
-        uint256 fee = (purchaseAmount * (launchFeePercent / 100)) / 100;
-        uint256 initialPurchase = purchaseAmount - fee;
-        IERC20(assetToken).safeTransferFrom(msg.sender, launchFeeReceiver, fee);
-        IERC20(assetToken).safeTransferFrom(
+        uint256 launchTax = (purchaseAmount_ * factory.launchTax()) / 10000;
+        uint256 initialPurchase = purchaseAmount_ - launchTax;
+        
+        // Transfer launch tax to tax vault
+        IERC20(assetToken_).safeTransferFrom(msg.sender, factory.taxVault(), launchTax);
+        IERC20(assetToken_).safeTransferFrom(
             msg.sender,
             address(this),
             initialPurchase
         );
 
-        // Pass maxTx to token constructor
+        // Create token with factory reference
         Token actualToken = new Token(
-            string.concat(name, "agent"), 
-            ticker,
+            string.concat(name_, "agent"), 
+            ticker_,
             initialSupply,
-            maxTxPercent
+            maxTxPercent,
+            address(factory),
+            address(this)
         );
         uint256 supply = actualToken.totalSupply();
 
-        address newPair = factory.createPair(address(actualToken), assetToken);
+        address newPair = factory.createPair(address(actualToken), assetToken_);
 
-        require(approve(address(router), address(actualToken), supply));
+        require(_approve(address(router), address(actualToken), supply));
 
         uint256 k = ((K * 10000) / assetRate);
         uint256 liquidity = (((k * 10000 ether) / supply) * 1 ether) / 10000;
@@ -263,9 +249,9 @@ contract Manager is
 
         TokenMetrics memory metrics = TokenMetrics({
             token: address(actualToken),
-            name: string.concat(name, "agent"),
-            baseName: name,
-            ticker: ticker,
+            name: string.concat(name_, "agent"),
+            baseName: name_,
+            ticker: ticker_,
             supply: supply,
             price: supply / liquidity,
             mktCap: liquidity,
@@ -280,9 +266,9 @@ contract Manager is
             creator: msg.sender,
             token: address(actualToken),
             pair: newPair,
-            prompt: prompt,
-            intention: intention,
-            url: url,
+            prompt: prompt_,
+            intention: intention_,
+            url: url_,
             metrics: metrics,
             isTrading: true,
             hasGraduated: false
@@ -295,8 +281,7 @@ contract Manager is
 
         emit Launched(address(actualToken), newPair, tokenIndex);
 
-        // Initial purchase
-        IERC20(assetToken).forceApprove(address(router), initialPurchase);
+        IERC20(assetToken_).forceApprove(address(router), initialPurchase);
         router.buy(initialPurchase, address(actualToken), address(this));
         actualToken.transfer(msg.sender, actualToken.balanceOf(address(this)));
 
@@ -304,18 +289,67 @@ contract Manager is
     }
 
     /**
-     * @notice Sells agent tokens
-     * @param amountIn Amount of tokens to sell
-     * @param tokenAddress Token address
+     * @notice Executes a buy order for agent tokens
+     * @param amountIn_ Amount of asset tokens to spend
+     * @param tokenAddress_ Address of token to buy
+     * @return success Whether the operation succeeded
      */
-    function sell(
-        uint256 amountIn,
-        address tokenAddress
-    ) external returns (bool) {
-        require(agentTokens[tokenAddress].isTrading, "Trading not active");
+    function buy(
+        uint256 amountIn_,
+        address tokenAddress_
+    ) external payable returns (bool) {
+        require(agentTokens[tokenAddress_].isTrading, "Trading not active");
 
         address pairAddress = factory.getPair(
-            tokenAddress,
+            tokenAddress_,
+            router.assetToken()
+        );
+
+        IPair pair = IPair(pairAddress);
+        (uint256 reserveA, uint256 reserveB) = pair.getReserves();
+
+        (uint256 amount1In, uint256 amount0Out) = router.buy(
+            amountIn_,
+            tokenAddress_,
+            msg.sender
+        );
+
+        uint256 newReserveA = reserveA - amount0Out;
+        uint256 newReserveB = reserveB + amount1In;
+
+        _updateMetrics(
+            tokenAddress_,
+            newReserveA,
+            newReserveB,
+            amount1In
+        );
+
+        uint256 totalSupply = IERC20(tokenAddress_).totalSupply();
+        require(totalSupply > 0, "Invalid total supply");
+
+        uint256 reservePercentage = (newReserveA * 100) / totalSupply;
+        
+        if (reservePercentage <= gradThresholdPercent) {
+            _graduate(tokenAddress_);
+        }
+
+        return true;
+    }
+
+    /**
+     * @notice Executes a sell order for agent tokens
+     * @param amountIn_ Amount of tokens to sell
+     * @param tokenAddress_ Address of token to sell
+     * @return success Whether the operation succeeded
+     */
+    function sell(
+        uint256 amountIn_,
+        address tokenAddress_
+    ) external returns (bool) {
+        require(agentTokens[tokenAddress_].isTrading, "Trading not active");
+
+        address pairAddress = factory.getPair(
+            tokenAddress_,
             router.assetToken()
         );
 
@@ -323,13 +357,13 @@ contract Manager is
         (uint256 reserveA, uint256 reserveB) = pair.getReserves();
         
         (uint256 amount0In, uint256 amount1Out) = router.sell(
-            amountIn,
-            tokenAddress,
+            amountIn_,
+            tokenAddress_,
             msg.sender
         );
 
         _updateMetrics(
-            tokenAddress,
+            tokenAddress_,
             reserveA + amount0In,
             reserveB - amount1Out,
             amount1Out
@@ -338,77 +372,32 @@ contract Manager is
         return true;
     }
 
-    /**
-     * @notice Buys agent tokens
-     * @param amountIn Amount of asset tokens to spend
-     * @param tokenAddress Token address to buy
-     */
-    function buy(
-        uint256 amountIn,
-        address tokenAddress
-    ) external payable returns (bool) {
-        require(agentTokens[tokenAddress].isTrading, "Trading not active");
-
-        address pairAddress = factory.getPair(
-            tokenAddress,
-            router.assetToken()
-        );
-
-        IPair pair = IPair(pairAddress);
-        (uint256 reserveA, uint256 reserveB) = pair.getReserves();
-
-        (uint256 amount1In, uint256 amount0Out) = router.buy(
-            amountIn,
-            tokenAddress,
-            msg.sender
-        );
-
-        uint256 newReserveA = reserveA - amount0Out;
-        uint256 newReserveB = reserveB + amount1In;
-
-        _updateMetrics(
-            tokenAddress,
-            newReserveA,
-            newReserveB,
-            amount1In
-        );
-
-        // Check graduation conditions with safe math
-        uint256 totalSupply = IERC20(tokenAddress).totalSupply();
-        require(totalSupply > 0, "Invalid total supply");
-
-        uint256 reservePercentage = (newReserveA * 100) / totalSupply;
-        
-        // Check if we should graduate
-        if (reservePercentage <= gradThresholdPercent) {
-            _graduate(tokenAddress);
-        }
-
-        return true;
-    }
+    /*//////////////////////////////////////////////////////////////
+                         INTERNAL HELPER FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Updates token metrics after trades
-     * @param tokenAddress Token address
-     * @param newReserveA New reserve of token A
-     * @param newReserveB New reserve of token B
-     * @param amount Amount involved in trade
+     * @notice Updates token metrics after a trade
+     * @param tokenAddress_ Address of the token
+     * @param newReserveA_ New reserve of token A
+     * @param newReserveB_ New reserve of token B
+     * @param amount_ Amount involved in trade
      */
     function _updateMetrics(
-        address tokenAddress,
-        uint256 newReserveA,
-        uint256 newReserveB,
-        uint256 amount
+        address tokenAddress_,
+        uint256 newReserveA_,
+        uint256 newReserveB_,
+        uint256 amount_
     ) private {
-        TokenData storage token = agentTokens[tokenAddress];
+        TokenData storage token = agentTokens[tokenAddress_];
         uint256 duration = block.timestamp - token.metrics.lastUpdate;
         
-        uint256 liquidity = newReserveB * 2;
-        uint256 marketCap = (token.metrics.supply * newReserveB) / newReserveA;
-        uint256 price = newReserveA / newReserveB;
+        uint256 liquidity = newReserveB_ * 2;
+        uint256 marketCap = (token.metrics.supply * newReserveB_) / newReserveA_;
+        uint256 price = newReserveA_ / newReserveB_;
         uint256 volume = duration > 86400
-            ? amount
-            : token.metrics.vol24h + amount;
+            ? amount_
+            : token.metrics.vol24h + amount_;
         uint256 lastPrice = duration > 86400
             ? token.metrics.price
             : token.metrics.lastPrice;
@@ -416,7 +405,7 @@ contract Manager is
         token.metrics.price = price;
         token.metrics.mktCap = marketCap;
         token.metrics.liq = liquidity;
-        token.metrics.vol = token.metrics.vol + amount;
+        token.metrics.vol = token.metrics.vol + amount_;
         token.metrics.vol24h = volume;
         token.metrics.lastPrice = lastPrice;
 
@@ -426,57 +415,53 @@ contract Manager is
     }
 
     /**
-     * @notice Graduates a token to Uniswap
-     * @param tokenAddress Address of token to graduate
+     * @notice Internal function to handle token graduation to Uniswap
+     * @param tokenAddress_ Address of token to graduate
      */
-    function _graduate(address tokenAddress) private {
-        TokenData storage token = agentTokens[tokenAddress];
+    function _graduate(address tokenAddress_) private {
+        TokenData storage token = agentTokens[tokenAddress_];
         require(token.isTrading && !token.hasGraduated, "Invalid graduation state");
 
-        // 1. Get the bonding curve pair and asset token
-        address bondingPair = factory.getPair(tokenAddress, router.assetToken());
+        address bondingPair = factory.getPair(tokenAddress_, router.assetToken());
         address assetTokenAddr = router.assetToken();
         
-        // 2. Get current balances from bonding curve pair
         IPair pair = IPair(bondingPair);
         uint256 tokenBalance = pair.balance();
         uint256 assetBalance = pair.assetBalance();
         require(tokenBalance > 0 && assetBalance > 0, "No liquidity to graduate");
 
-        // 3. Transfer all tokens from bonding curve to this contract
-        router.graduate(tokenAddress);
+        router.graduate(tokenAddress_);
 
-        // 4. Verify we received both tokens
         require(
-            IERC20(tokenAddress).balanceOf(address(this)) >= tokenBalance &&
+            IERC20(tokenAddress_).balanceOf(address(this)) >= tokenBalance &&
             IERC20(assetTokenAddr).balanceOf(address(this)) >= assetBalance,
             "Failed to receive tokens"
         );
 
-        // 5. Approve tokens for Uniswap
-        IERC20(tokenAddress).forceApprove(address(uniswapRouter), tokenBalance);
+        IERC20(tokenAddress_).forceApprove(address(uniswapRouter), tokenBalance);
         IERC20(assetTokenAddr).forceApprove(address(uniswapRouter), assetBalance);
         
-        // 6. Get or create Uniswap pair
         address uniswapFactory = uniswapRouter.factory();
-        address uniswapPair = IUniswapV2Factory(uniswapFactory).getPair(tokenAddress, assetTokenAddr);
+        address uniswapPair = IUniswapV2Factory(uniswapFactory).getPair(tokenAddress_, assetTokenAddr);
         
         if (uniswapPair == address(0)) {
-            uniswapPair = IUniswapV2Factory(uniswapFactory).createPair(tokenAddress, assetTokenAddr);
+            uniswapPair = IUniswapV2Factory(uniswapFactory).createPair(tokenAddress_, assetTokenAddr);
         }
         require(uniswapPair != address(0), "Failed to get/create Uniswap pair");
 
-        // 7. Add liquidity to Uniswap
+        // Set token as graduated
+        Token(tokenAddress_).graduate(uniswapPair);
+
         (uint256 amountToken, uint256 amountAsset, uint256 liquidity) = 
             uniswapRouter.addLiquidity(
-                tokenAddress,           // tokenA
-                assetTokenAddr,         // tokenB
-                tokenBalance,           // amountADesired
-                assetBalance,           // amountBDesired
-                tokenBalance * 95 / 100, // amountAMin (5% slippage)
-                assetBalance * 95 / 100, // amountBMin (5% slippage)
-                address(0),             // LP tokens will be burned
-                block.timestamp + 3600  // 1 hour deadline
+                tokenAddress_,
+                assetTokenAddr,
+                tokenBalance,
+                assetBalance,
+                tokenBalance * 95 / 100,
+                assetBalance * 95 / 100,
+                address(0),
+                block.timestamp + 3600
             );
         
         require(
@@ -486,14 +471,71 @@ contract Manager is
             "Liquidity addition failed"
         );
 
-        // 8. Update token state
         token.isTrading = false;
         token.hasGraduated = true;
         token.pair = uniswapPair;
 
-        emit Graduated(tokenAddress);
+        emit Graduated(tokenAddress_);
     }
 
-    // Add helper function to receive ETH
+    /**
+     * @notice Internal helper to approve token spending
+     * @param spender_ Address to approve
+     * @param tokenAddress_ Token to approve
+     * @param amount_ Amount to approve
+     * @return success Whether the approval succeeded
+     */
+    function _approve(
+        address spender_,
+        address tokenAddress_,
+        uint256 amount_
+    ) internal returns (bool) {
+        IERC20(tokenAddress_).forceApprove(spender_, amount_);
+        return true;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         ADMIN FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Updates the initial supply for new tokens
+     * @param newSupply_ New initial supply value
+     */
+    function setInitialSupply(uint256 newSupply_) external onlyOwner {
+        initialSupply = newSupply_;
+    }
+
+    /**
+     * @notice Updates the graduation threshold percentage
+     * @param newThresholdPercent_ New threshold percentage value
+     */
+    function setGradThresholdPercent(uint256 newThresholdPercent_) external onlyOwner {
+        gradThresholdPercent = newThresholdPercent_;
+    }
+
+    /**
+     * @notice Updates the maximum transaction percentage
+     * @param maxTxPercent_ New maximum transaction percentage (1-100)
+     */
+    function setMaxTxPercent(uint256 maxTxPercent_) external onlyOwner {
+        require(maxTxPercent_ <= 100, "Max transaction cannot exceed 100%");
+        maxTxPercent = maxTxPercent_;
+    }
+
+    /**
+     * @notice Updates the asset rate used in calculations
+     * @param newRate_ New asset rate value
+     */
+    function setAssetRate(uint256 newRate_) external onlyOwner {
+        require(newRate_ > 0, "Rate must be positive");
+        assetRate = newRate_;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         FALLBACK FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+    
+    /// @notice Allows contract to receive ETH
     receive() external payable {}
 }

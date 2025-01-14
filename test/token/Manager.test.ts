@@ -12,15 +12,15 @@ describe("Manager", function() {
 
   describe("Initialization", function() {
     it("should set correct initial values", async function() {
-      const { manager, factory, router, owner } = context;
+      const { manager, factory, router } = context;
       
       expect(await manager.factory()).to.equal(await factory.getAddress());
       expect(await manager.router()).to.equal(await router.getAddress());
-      expect(await manager.launchFeeReceiver()).to.equal(await owner.getAddress());
-      expect(Number(await manager.launchFeePercent())).to.equal(Number(500)); // 5%
-      expect(Number(await manager.initialSupply())).to.equal(Number(1_000_000));
-      expect(Number(await manager.assetRate())).to.equal(Number(10_000));
-      expect(Number(await manager.gradThresholdPercent())).to.equal(Number(50));
+      // Launch fee is now handled by factory
+      expect(Number(await factory.launchTax())).to.equal(500); // 5%
+      expect(Number(await manager.initialSupply())).to.equal(1_000_000);
+      expect(Number(await manager.assetRate())).to.equal(10_000);
+      expect(Number(await manager.gradThresholdPercent())).to.equal(50);
     });
 
     it("should have correct owner", async function() {
@@ -313,14 +313,13 @@ describe("Manager", function() {
   });
 
   describe("Admin Functions", function() {
-    it("should update fee parameters correctly", async function() {
-      const { manager, alice, owner } = context;
+    it("should update initial supply correctly", async function() {
+      const { manager, owner } = context;
       
-      const newFee = ethers.parseEther("0.6");
-      await manager.connect(owner).setFee(newFee, await alice.getAddress());
+      const newSupply = 2_000_000;
+      await manager.connect(owner).setInitialSupply(newSupply);
       
-      expect(Number(await manager.launchFeePercent())).to.equal(Number(newFee));
-      expect(await manager.launchFeeReceiver()).to.equal(await alice.getAddress());
+      expect(Number(await manager.initialSupply())).to.equal(newSupply);
     });
 
     it("should update graduation threshold correctly", async function() {
