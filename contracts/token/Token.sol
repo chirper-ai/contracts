@@ -297,23 +297,28 @@ contract Token is Context, IERC20, Ownable {
         address to_,
         uint256 amount_
     ) private view returns (uint256) {
+        // Early return conditions
         if (!hasGraduated || taxExempt[from_] || taxExempt[to_]) {
             return 0;
         }
 
         uint256 taxRate;
         if (isPair[from_]) {
-            // Buy tax from Factory
+            // Buy tax
             taxRate = factory.buyTax();
         } else if (isPair[to_]) {
-            // Sell tax from Factory
+            // Sell tax
             taxRate = factory.sellTax();
         } else {
             // No tax on wallet transfers
             return 0;
         }
 
-        return (amount_ * taxRate) / 10000; // Base 10000 for basis points
+        // Safe tax calculation
+        // taxRate is in basis points (max 10000)
+        // This calculation cannot overflow as amount_ * 10000 would have to be > 2^256
+        // for this to be possible
+        return (amount_ * taxRate) / 10000;
     }
 
     /**
@@ -349,28 +354,46 @@ contract Token is Context, IERC20, Ownable {
         require(to_ != address(0), "Invalid recipient");
         require(amount_ > 0, "Invalid amount");
 
+        // Check transaction limit if sender is not exempt
         if (!transactionLimitExempt[from_]) {
-            require(amount_ <= maxTransactionAmount, "Exceeds limit");
+            require(
+                amount_ <= maxTransactionAmount,
+                "Transfer amount exceeds transaction limit"
+            );
         }
 
+        // Calculate tax first
         uint256 taxAmount = _calculateTax(from_, to_, amount_);
         uint256 finalAmount = amount_ - taxAmount;
+
+        // Additional check for recipient if they're not exempt
+        if (!transactionLimitExempt[to_]) {
+            require(
+                finalAmount <= maxTransactionAmount,
+                "Recipient amount exceeds transaction limit"
+            );
+        }
+
+        // Ensure sender has enough balance for full amount including tax
+        require(balances[from_] >= amount_, "Insufficient balance");
+
+        // Update sender balance first
+        balances[from_] = balances[from_] - amount_;
 
         if (taxAmount > 0) {
             address taxVault_ = factory.taxVault();
             uint256 halfTax = taxAmount / 2;
             
-            // Split tax between vault and token owner
-            balances[taxVault_] = balances[taxVault_] + halfTax;
+            // Update tax recipient balances
+            balances[taxVault_] += halfTax;
             emit Transfer(from_, taxVault_, halfTax);
 
-            balances[owner()] = balances[owner()] + (taxAmount - halfTax);
+            balances[owner()] += (taxAmount - halfTax);
             emit Transfer(from_, owner(), taxAmount - halfTax);
         }
 
-        balances[from_] = balances[from_] - amount_;
-        balances[to_] = balances[to_] + finalAmount;
-
+        // Update recipient balance
+        balances[to_] += finalAmount;
         emit Transfer(from_, to_, finalAmount);
     }
 
