@@ -109,8 +109,8 @@ contract Manager is
      * @param hasGraduated Whether the token has graduated to DEXes
      * @param bondingPair Address of the bonding curve pair
      * @param dexRouters Array of DEX routers and their weights
-     * @param dexPairs Array of DEX pairs created during graduation
-     * @param dexPairs This is at the end
+     * @param dexPools Array of DEX pairs created during graduation
+     * @param mainDexPool This is at the end
      */
     struct TokenData {
         address creator;
@@ -122,7 +122,8 @@ contract Manager is
         bool hasGraduated;
         address bondingPair;     
         DexRouter[] dexRouters; 
-        address[] dexPairs;      // This is at the end
+        address[] dexPools;      // This is at the end
+        address mainDexPool;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -285,7 +286,8 @@ contract Manager is
             isTrading: true,
             hasGraduated: false,
             dexRouters: dexRouters_,
-            dexPairs: new address[](0)
+            dexPools: new address[](0),
+            mainDexPool: address(0)
         });
 
         agentTokens[address(actualToken)] = localToken;
@@ -448,9 +450,10 @@ contract Manager is
         );
 
         // Update token data with new pairs
-        token.dexPairs = newPairs;
+        token.dexPools = newPairs;
         token.isTrading = false;
         token.hasGraduated = true;
+        token.mainDexPool = newPairs[0];
 
         emit Graduated(tokenAddress_);
     }
@@ -513,19 +516,19 @@ contract Manager is
 
             address dexFactory = dexRouter.factory();
             
-            address dexPair = IUniswapV2Factory(dexFactory).getPair(
+            address dexPool = IUniswapV2Factory(dexFactory).getPair(
                 tokenAddress_,
                 assetTokenAddr
             );
 
-            if (dexPair == address(0)) {
-                dexPair = IUniswapV2Factory(dexFactory).createPair(
+            if (dexPool == address(0)) {
+                dexPool = IUniswapV2Factory(dexFactory).createPair(
                     tokenAddress_,
                     assetTokenAddr
                 );
             }
             
-            require(dexPair != address(0), "Failed to get/create DEX pair");
+            require(dexPool != address(0), "Failed to get/create DEX pair");
             
             (uint256 amountToken, uint256 amountAsset, uint256 liquidity) = 
                 dexRouter.addLiquidity(
@@ -546,7 +549,7 @@ contract Manager is
                 "Liquidity addition failed requirements"
             );
 
-            newPairs[i] = dexPair;
+            newPairs[i] = dexPool;
         }
         
         Token(tokenAddress_).graduate(newPairs);
@@ -606,6 +609,10 @@ contract Manager is
     function setAssetRate(uint256 newRate_) external onlyOwner {
         require(newRate_ > 0, "Rate must be positive");
         assetRate = newRate_;
+    }
+    
+    function getDexPools(address token) external view returns (address[] memory) {
+        return agentTokens[token].dexPools;
     }
 
     /*//////////////////////////////////////////////////////////////

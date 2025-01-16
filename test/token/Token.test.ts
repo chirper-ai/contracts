@@ -73,14 +73,14 @@ describe("Token", function() {
 
   describe("Tax Functionality", function() {
     it("should apply buy tax correctly", async function() {
-      // Set token as paired in factory
-      await token.setPair(await context.alice.getAddress(), true);
+      // Set token as pooled in factory
+      await token.setPool(await context.alice.getAddress(), true);
   
       // Transfer a larger amount first to alice
       const setupAmount = ethers.parseEther("10000");
       await token.transfer(await context.alice.getAddress(), setupAmount);
       
-      // Transfer from pair address to simulate buy (should apply tax)
+      // Transfer from pool address to simulate buy (should apply tax)
       const transferAmount = ethers.parseEther("1000");
       await token.connect(context.alice).transfer(await context.bob.getAddress(), transferAmount);
       
@@ -90,14 +90,14 @@ describe("Token", function() {
   });
 
     it("should apply sell tax correctly", async function() {
-      // Set token as paired in factory
-      await token.setPair(await context.alice.getAddress(), true);
+      // Set token as pooled in factory
+      await token.setPool(await context.alice.getAddress(), true);
 
       // Transfer tokens to bob first
       const transferAmount = ethers.parseEther("1000");
       await token.transfer(await context.bob.getAddress(), transferAmount);
       
-      // Transfer to pair address to simulate sell (should apply tax)
+      // Transfer to pool address to simulate sell (should apply tax)
       await token.connect(context.bob).transfer(await context.alice.getAddress(), transferAmount);
       
       // Get tax vault balance
@@ -128,16 +128,16 @@ describe("Token", function() {
       expect(await token.hasGraduated()).to.be.false;
       
       // Only manager can graduate
-      await token.graduate(await context.alice.getAddress()); // using alice as pair address
+      await token.graduate([await context.alice.getAddress()]); // using alice as pool address
       
       expect(await token.hasGraduated()).to.be.true;
-      expect(await token.isPair(await context.alice.getAddress())).to.be.true;
+      expect(await token.isPool(await context.alice.getAddress())).to.be.true;
     });
 
     it("should fail graduation from non-manager", async function() {
       let failed = false;
       try {
-        await token.connect(context.alice).graduate(await context.bob.getAddress());
+        await token.connect(context.alice).graduate([await context.bob.getAddress()]);
       } catch (error) {
         failed = true;
       }
@@ -145,11 +145,11 @@ describe("Token", function() {
     });
 
     it("should fail graduation if already graduated", async function() {
-      await token.graduate(await context.alice.getAddress());
+      await token.graduate([await context.alice.getAddress()]);
       
       let failed = false;
       try {
-        await token.graduate(await context.bob.getAddress());
+        await token.graduate([await context.bob.getAddress()]);
       } catch (error) {
         failed = true;
       }

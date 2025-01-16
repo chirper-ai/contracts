@@ -59,8 +59,8 @@ contract Token is Context, IERC20, Ownable {
     /// @notice Maps addresses that are excluded from taxes
     mapping(address => bool) private taxExempt;
 
-    /// @notice Maps pairs (e.g., Uniswap) for tax calculation
-    mapping(address => bool) public isPair;
+    /// @notice Maps pools (e.g., Uniswap) for tax calculation
+    mapping(address => bool) public isPool;
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -72,8 +72,8 @@ contract Token is Context, IERC20, Ownable {
     /// @notice Emitted when token graduates
     event Graduated();
 
-    /// @notice Emitted when pair status is updated
-    event PairUpdated(address pair_, bool isPair_);
+    /// @notice Emitted when pool status is updated
+    event PoolUpdated(address pool_, bool isPool_);
 
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
@@ -225,21 +225,21 @@ contract Token is Context, IERC20, Ownable {
     }
 
     /**
-     * @notice Sets the graduated status and registers multiple pairs (can only be set once by manager)
-     * @param pairs_ Array of pair contract addresses
+     * @notice Sets the graduated status and registers multiple pools (can only be set once by manager)
+     * @param pools_ Array of pool contract addresses
      */
     function graduate(
-        address[] memory pairs_
+        address[] memory pools_
     ) external onlyManager {
         require(!hasGraduated, "Already graduated");
-        require(pairs_.length > 0, "Must provide at least one pair");
+        require(pools_.length > 0, "Must provide at least one pool");
         
         hasGraduated = true;
         
-        for(uint i = 0; i < pairs_.length; i++) {
-            require(pairs_[i] != address(0), "Invalid pair address");
-            isPair[pairs_[i]] = true;
-            emit PairUpdated(pairs_[i], true);
+        for(uint i = 0; i < pools_.length; i++) {
+            require(pools_[i] != address(0), "Invalid pool address");
+            isPool[pools_[i]] = true;
+            emit PoolUpdated(pools_[i], true);
         }
         
         emit Graduated();
@@ -264,14 +264,14 @@ contract Token is Context, IERC20, Ownable {
     }
 
     /**
-     * @notice Sets or unsets a pair address
+     * @notice Sets or unsets a pool address
      * @param account_ Address to update
-     * @param isPair_ Whether the address is a pair
+     * @param isPool_ Whether the address is a pool
      */
-    function setPair(address account_, bool isPair_) external onlyOwner {
+    function setPool(address account_, bool isPool_) external onlyOwner {
         require(account_ != address(0), "Invalid address");
-        isPair[account_] = isPair_;
-        emit PairUpdated(account_, isPair_);
+        isPool[account_] = isPool_;
+        emit PoolUpdated(account_, isPool_);
     }
 
     /**
@@ -308,10 +308,10 @@ contract Token is Context, IERC20, Ownable {
         }
 
         uint256 taxRate;
-        if (isPair[from_]) {
+        if (isPool[from_]) {
             // Buy tax
             taxRate = factory.buyTax();
-        } else if (isPair[to_]) {
+        } else if (isPool[to_]) {
             // Sell tax
             taxRate = factory.sellTax();
         } else {
