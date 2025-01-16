@@ -597,14 +597,11 @@ contract Manager is
         assetRate = newRate_;
     }
     
+    /**
+     * @notice gets the list of dex pools for a token
+     * @param token address of the token
+     */
     function getDexPools(address token) external view returns (address[] memory) {
         return agentTokens[token].dexPools;
     }
-
-    /*//////////////////////////////////////////////////////////////
-                         FALLBACK FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-    
-    /// @notice Allows contract to receive ETH
-    receive() external payable {}
 }
