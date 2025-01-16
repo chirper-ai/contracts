@@ -17,7 +17,7 @@ async function main() {
   const MAX_TX_PERCENT = 100; // 100% max transaction size (no limit)
 
   // Use VANA (native token) and DEX addresses on moksha testnet
-  const UNISWAP_ROUTER_ADDRESS = "0x0000000000000000000000000000000000000000"; // TODO: Replace with actual DEX router on moksha
+  const UNISWAP_ROUTER_ADDRESS = "0x2e7bfff8185C5a32991D2b0d68d4d2EFAaAA8F7B"; // TODO: Replace with actual DEX router on moksha
   const ASSET_TOKEN_ADDRESS = ethers.ZeroAddress; // Using ZeroAddress to represent native token (VANA)
 
   console.log("Deploying Factory...");
@@ -48,8 +48,7 @@ async function main() {
     INITIAL_SUPPLY,
     ASSET_RATE,
     GRAD_THRESHOLD_PERCENT,
-    MAX_TX_PERCENT,
-    UNISWAP_ROUTER_ADDRESS
+    MAX_TX_PERCENT
   ]);
   await manager.waitForDeployment();
   console.log("Manager deployed to:", await manager.getAddress());
@@ -60,13 +59,37 @@ async function main() {
   // Factory setup
   const CREATOR_ROLE = await factory.CREATOR_ROLE();
   const ADMIN_ROLE = await factory.ADMIN_ROLE();
-  await factory.grantRole(ADMIN_ROLE, await manager.getAddress());
-  await factory.grantRole(CREATOR_ROLE, await manager.getAddress());
-  await factory.setRouter(await router.getAddress());
 
-  // Router setup
+  // Check if deployer has admin role
+  if (!await factory.hasRole(ADMIN_ROLE, deployer.address)) {
+      console.log("Deployer missing ADMIN_ROLE, something is wrong");
+      return;
+  }
+
+  // Set router first using deployer's admin privileges
+  const currentRouter = await factory.router();
+  if (currentRouter !== await router.getAddress()) {
+      await factory.connect(deployer).setRouter(await router.getAddress());
+      console.log("Set router address in factory");
+  }
+
+  // Then grant roles to manager
+  if (!await factory.hasRole(ADMIN_ROLE, await manager.getAddress())) {
+      await factory.grantRole(ADMIN_ROLE, await manager.getAddress());
+      console.log("Granted ADMIN_ROLE to manager");
+  }
+
+  if (!await factory.hasRole(CREATOR_ROLE, await manager.getAddress())) {
+      await factory.grantRole(CREATOR_ROLE, await manager.getAddress());
+      console.log("Granted CREATOR_ROLE to manager");
+  }
+
+  // Router setup - check before granting
   const EXECUTOR_ROLE = await router.EXECUTOR_ROLE();
-  await router.grantRole(EXECUTOR_ROLE, await manager.getAddress());
+  if (!await router.hasRole(EXECUTOR_ROLE, await manager.getAddress())) {
+      await router.grantRole(EXECUTOR_ROLE, await manager.getAddress());
+      console.log("Granted EXECUTOR_ROLE to manager");
+  }
 
   console.log("Deployment completed!");
   console.log({

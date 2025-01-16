@@ -73,7 +73,6 @@ contract Router is
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
 
         require(factory_ != address(0), "Invalid factory");
-        require(assetToken_ != address(0), "Invalid asset token");
 
         factory = Factory(factory_);
         assetToken = assetToken_;

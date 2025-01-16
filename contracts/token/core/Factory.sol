@@ -113,6 +113,7 @@ contract Factory is
     ) external initializer {
         __AccessControl_init();
         __ReentrancyGuard_init();
+        _grantRole(ADMIN_ROLE, msg.sender);
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
 
         require(taxVault_ != address(0), "Invalid tax vault");
