@@ -106,7 +106,8 @@ export async function deployFixture(): Promise<TestContext> {
   const Router = await ethers.getContractFactory("Router");
   const router = await upgrades.deployProxy(Router, [
     await factory.getAddress(),
-    await assetToken.getAddress()
+    await assetToken.getAddress(),
+    100, // 100% max transaction percent, no limit
   ]);
   await router.waitForDeployment();
 
@@ -128,7 +129,6 @@ export async function deployFixture(): Promise<TestContext> {
     1_000_000,              // initial supply
     10_000,                 // asset rate
     50,                     // graduation threshold percent
-    100,                    // 100% max transaction (no limit)
   ]);
   await manager.waitForDeployment();
 

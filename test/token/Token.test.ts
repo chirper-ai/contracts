@@ -17,7 +17,6 @@ describe("Token", function() {
       "Test Token",
       "TEST",
       "1000000", // 1M tokens
-      50,        // 50% max transaction limit
       await context.factory.getAddress(),
       await context.owner.getAddress() // owner as manager
     );
@@ -30,7 +29,6 @@ describe("Token", function() {
       expect(await token.symbol()).to.equal("TEST");
       expect(Number(await token.decimals())).to.equal(Number(18));
       expect(Number(await token.totalSupply())).to.equal(Number(ethers.parseEther("1000000")));
-      expect(Number(await token.maxTransactionPercent())).to.equal(50);
     });
 
     it("should assign initial supply to deployer", async function() {
@@ -53,21 +51,6 @@ describe("Token", function() {
       const finalBalance = await token.balanceOf(await context.alice.getAddress());
       
       expect(finalBalance - initialBalance).to.equal(amount);
-    });
-
-    it("should fail transfer above max transaction limit", async function() {
-      const amount = ethers.parseEther("600000"); // 60% of total supply
-
-      // set limit
-      await token.updateMaxTransaction(50);
-      
-      let failed = false;
-      try {
-        await token.transfer(await context.alice.getAddress(), amount);
-      } catch (error) {
-        failed = true;
-      }
-      expect(failed).to.be.true;
     });
   });
 
@@ -103,23 +86,6 @@ describe("Token", function() {
       // Get tax vault balance
       const taxVaultBalance = await token.balanceOf(await context.factory.taxVault());
       expect(Number(taxVaultBalance)).to.be.gt(0);
-    });
-  });
-
-  describe("Owner Functions", function() {
-    it("should update max transaction limit", async function() {
-      const newLimit = 75; // 75%
-      await token.updateMaxTransaction(newLimit);
-      expect(Number(await token.maxTransactionPercent())).to.equal(newLimit);
-    });
-
-    it("should exclude address from transaction limit", async function() {
-      const amount = ethers.parseEther("600000"); // 60% of supply
-      await token.excludeFromTransactionLimit(await context.alice.getAddress());
-      
-      // Transfer should now succeed despite being above limit
-      await token.transfer(await context.alice.getAddress(), amount);
-      expect(Number(await token.balanceOf(await context.alice.getAddress()))).to.equal(Number(amount));
     });
   });
 

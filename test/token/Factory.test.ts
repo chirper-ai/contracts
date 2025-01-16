@@ -39,7 +39,6 @@ describe("Factory", function() {
         "Test Agent",
         "TEST",
         "1000000",
-        100,
         await factory.getAddress(),
         await alice.getAddress()  // manager address
       );
@@ -69,7 +68,6 @@ describe("Factory", function() {
         "Test Agent",
         "TEST",
         "1000000",
-        100,
         await factory.getAddress(),
         await alice.getAddress()
       );

@@ -32,12 +32,6 @@ contract Token is Context, IERC20, Ownable {
     /// @notice Token symbol
     string private tokenSymbol;
 
-    /// @notice Maximum transaction size as percentage of total supply
-    uint256 public maxTransactionPercent;
-
-    /// @notice Maximum transaction amount in token units
-    uint256 private maxTransactionAmount;
-
     /// @notice Whether the token has graduated to Uniswap
     bool public hasGraduated;
 
@@ -52,9 +46,6 @@ contract Token is Context, IERC20, Ownable {
 
     /// @notice Maps owner addresses to their spender allowances
     mapping(address => mapping(address => uint256)) private allowances;
-
-    /// @notice Maps addresses that are excluded from transaction limits
-    mapping(address => bool) private transactionLimitExempt;
 
     /// @notice Maps addresses that are excluded from taxes
     mapping(address => bool) private taxExempt;
@@ -84,7 +75,6 @@ contract Token is Context, IERC20, Ownable {
      * @param name_ Name of the token
      * @param symbol_ Symbol of the token
      * @param initialSupply_ Initial supply in whole tokens
-     * @param maxTxPercent_ Maximum transaction size as percentage
      * @param factory_ Address of the factory contract
      * @param manager_ Address of the manager contract
      */
@@ -92,7 +82,6 @@ contract Token is Context, IERC20, Ownable {
         string memory name_,
         string memory symbol_,
         uint256 initialSupply_,
-        uint256 maxTxPercent_,
         address factory_,
         address manager_
     ) Ownable(msg.sender) {
@@ -107,12 +96,8 @@ contract Token is Context, IERC20, Ownable {
         
         balances[_msgSender()] = totalTokenSupply;
         
-        transactionLimitExempt[_msgSender()] = true;
-        transactionLimitExempt[address(this)] = true;
         taxExempt[_msgSender()] = true;
         taxExempt[address(this)] = true;
-        
-        _updateMaxTransaction(maxTxPercent_);
         
         emit Transfer(address(0), _msgSender(), totalTokenSupply);
     }
@@ -209,14 +194,6 @@ contract Token is Context, IERC20, Ownable {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Updates the maximum transaction limit
-     * @param newMaxPercent_ New maximum as percentage of total supply
-     */
-    function updateMaxTransaction(uint256 newMaxPercent_) external onlyOwner {
-        _updateMaxTransaction(newMaxPercent_);
-    }
-
-    /**
      * @notice Modifier to restrict function to manager only
      */
     modifier onlyManager() {
@@ -243,15 +220,6 @@ contract Token is Context, IERC20, Ownable {
         }
         
         emit Graduated();
-    }
-
-    /**
-     * @notice Excludes an address from transaction limits
-     * @param account_ Address to exclude
-     */
-    function excludeFromTransactionLimit(address account_) external onlyOwner {
-        require(account_ != address(0), "Invalid address");
-        transactionLimitExempt[account_] = true;
     }
 
     /**
@@ -359,25 +327,9 @@ contract Token is Context, IERC20, Ownable {
         require(to_ != address(0), "Invalid recipient");
         require(amount_ > 0, "Invalid amount");
 
-        // Check transaction limit if sender is not exempt
-        if (!transactionLimitExempt[from_]) {
-            require(
-                amount_ <= maxTransactionAmount,
-                "Transfer amount exceeds transaction limit"
-            );
-        }
-
         // Calculate tax first
         uint256 taxAmount = _calculateTax(from_, to_, amount_);
         uint256 finalAmount = amount_ - taxAmount;
-
-        // Additional check for recipient if they're not exempt
-        if (!transactionLimitExempt[to_]) {
-            require(
-                finalAmount <= maxTransactionAmount,
-                "Recipient amount exceeds transaction limit"
-            );
-        }
 
         // Ensure sender has enough balance for full amount including tax
         require(balances[from_] >= amount_, "Insufficient balance");
@@ -400,15 +352,5 @@ contract Token is Context, IERC20, Ownable {
         // Update recipient balance
         balances[to_] += finalAmount;
         emit Transfer(from_, to_, finalAmount);
-    }
-
-    /**
-     * @notice Internal function to update max transaction limit
-     * @param newMaxPercent_ New maximum as percentage of total supply
-     */
-    function _updateMaxTransaction(uint256 newMaxPercent_) internal {
-        maxTransactionPercent = newMaxPercent_;
-        maxTransactionAmount = (newMaxPercent_ * totalTokenSupply) / 100;
-        emit MaxTransactionUpdated(newMaxPercent_);
     }
 }

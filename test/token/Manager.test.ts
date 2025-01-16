@@ -197,7 +197,7 @@ describe("Manager", function() {
       const tokenAddress = await agentToken.getAddress();
       
       // Buy enough to trigger graduation
-      const buyAmount = ethers.parseEther("10000000");
+      const buyAmount = ethers.parseEther("1000000");
       await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
       
       const buyTx = await manager.connect(bob).buy(buyAmount, tokenAddress);
@@ -223,7 +223,7 @@ describe("Manager", function() {
       const agentToken = await createToken(context, alice);
       const tokenAddress = await agentToken.getAddress();
       
-      const buyAmount = ethers.parseEther("10000000");
+      const buyAmount = ethers.parseEther("1000000");
       await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
       
       const tx = await manager.connect(bob).buy(buyAmount, tokenAddress);

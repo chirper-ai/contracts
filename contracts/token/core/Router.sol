@@ -45,6 +45,9 @@ contract Router is
     
     /// @notice Asset token used for all trading pairs
     address public assetToken;
+    
+    /// @notice Maximum transaction amount for a single swap
+    uint256 public maxTxPercent;
 
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
@@ -63,10 +66,12 @@ contract Router is
      * @notice Initializes the router contract with required dependencies
      * @param factory_ Address of the factory contract
      * @param assetToken_ Address of the asset token
+     * @param maxTxPercent_ Maximum transaction amount for a single swap
      */
     function initialize(
         address factory_,
-        address assetToken_
+        address assetToken_,
+        uint256 maxTxPercent_
     ) external initializer {
         __ReentrancyGuard_init();
         __AccessControl_init();
@@ -76,6 +81,7 @@ contract Router is
 
         factory = Factory(factory_);
         assetToken = assetToken_;
+        maxTxPercent = maxTxPercent_;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -97,6 +103,12 @@ contract Router is
         require(tokenAddress_ != address(0), "Invalid token");
         require(to_ != address(0), "Invalid recipient");
         require(amountIn_ > 0, "Invalid amount");
+        
+        // check max transaction percent by total supply
+        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 100;
+
+        // check max transaction amount
+        require(amountIn_ <= maxTxAmount, "Exceeds max transaction");
         
         // Check token hasn't graduated
         Token token = Token(tokenAddress_);
@@ -140,6 +152,12 @@ contract Router is
     ) external nonReentrant onlyRole(EXECUTOR_ROLE) returns (uint256, uint256) {
         require(tokenAddress_ != address(0), "Invalid token");
         require(to_ != address(0), "Invalid recipient");
+        
+        // check max transaction percent by total supply
+        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 100;
+
+        // check max transaction amount
+        require(amountIn_ <= maxTxAmount, "Exceeds max transaction");
         
         // Check token hasn't graduated
         Token token = Token(tokenAddress_);
@@ -212,6 +230,22 @@ contract Router is
         
         IBondingPair(pair).transferAsset(msg.sender, assetBalance);
         IBondingPair(pair).transferTo(msg.sender, agentBalance);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            ADMIN FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Sets the maximum transaction amount for a single swap
+     * @param maxTxPercent_ Maximum transaction amount for a single swap
+     */
+    function setMaxTxPercent(uint256 maxTxPercent_) external onlyRole(ADMIN_ROLE) {
+        // Ensure max transaction is within acceptable bounds
+        require(maxTxPercent_ > 0, "Invalid amount");
+        require(maxTxPercent_ <= 100, "Exceeds 100%");
+
+        maxTxPercent = maxTxPercent_;
     }
 
     /*//////////////////////////////////////////////////////////////

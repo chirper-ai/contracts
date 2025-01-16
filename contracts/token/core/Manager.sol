@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "hardhat/console.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
@@ -41,9 +40,6 @@ contract Manager is
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
-
-    /// @notice Maximum transaction percentage (1-100)
-    uint256 public maxTxPercent;
 
     /// @notice Factory contract for creating token pairs
     Factory public factory;
@@ -168,20 +164,17 @@ contract Manager is
      * @param initSupply_ Initial token supply
      * @param assetRateValue_ Asset rate for calculations
      * @param gradThresholdPercent_ Graduation threshold percentage
-     * @param maxTxPercent_ Maximum transaction percentage
      */
     function initialize(
         address factory_,
         address router_,
         uint256 initSupply_,
         uint256 assetRateValue_,
-        uint256 gradThresholdPercent_,
-        uint256 maxTxPercent_
+        uint256 gradThresholdPercent_
     ) external initializer {
         __Ownable_init(msg.sender);
         __ReentrancyGuard_init();
         
-        require(maxTxPercent_ <= 100, "Max transaction cannot exceed 100%");
         require(factory_ != address(0), "Invalid factory");
         require(router_ != address(0), "Invalid router");
 
@@ -190,7 +183,6 @@ contract Manager is
         initialSupply = initSupply_;
         assetRate = assetRateValue_;
         gradThresholdPercent = gradThresholdPercent_;
-        maxTxPercent = maxTxPercent_;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -248,7 +240,6 @@ contract Manager is
             string.concat(name_, "agent"), 
             ticker_,
             initialSupply,
-            maxTxPercent,
             address(factory),
             address(this)
         );
@@ -593,15 +584,6 @@ contract Manager is
      */
     function setGradThresholdPercent(uint256 newThresholdPercent_) external onlyOwner {
         gradThresholdPercent = newThresholdPercent_;
-    }
-
-    /**
-     * @notice Updates the maximum transaction percentage
-     * @param maxTxPercent_ New maximum transaction percentage (1-100)
-     */
-    function setMaxTxPercent(uint256 maxTxPercent_) external onlyOwner {
-        require(maxTxPercent_ <= 100, "Max transaction cannot exceed 100%");
-        maxTxPercent = maxTxPercent_;
     }
 
     /**
