@@ -34,7 +34,7 @@ export async function createToken(
   // Default to using uniswapRouter with 100% weight if no routers specified
   const defaultDexRouters = [{
     routerAddress: await uniswapRouter.getAddress(),
-    weight: 100
+    weight: 10000
   }];
 
   const tx = await manager.connect(creator).launch(
@@ -107,7 +107,7 @@ export async function deployFixture(): Promise<TestContext> {
   const router = await upgrades.deployProxy(Router, [
     await factory.getAddress(),
     await assetToken.getAddress(),
-    100, // 100% max transaction percent, no limit
+    10000, // 100% max transaction percent, no limit
   ]);
   await router.waitForDeployment();
 
@@ -128,7 +128,7 @@ export async function deployFixture(): Promise<TestContext> {
     await router.getAddress(),
     1_000_000,              // initial supply
     10_000,                 // asset rate
-    50,                     // graduation threshold percent
+    5000,                   // graduation threshold percent
   ]);
   await manager.waitForDeployment();
 

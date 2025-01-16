@@ -213,10 +213,10 @@ contract Manager is
         uint256 totalWeight;
         for(uint i = 0; i < dexRouters_.length; i++) {
             require(dexRouters_[i].routerAddress != address(0), "Invalid router address");
-            require(dexRouters_[i].weight > 0 && dexRouters_[i].weight <= 100, "Invalid weight");
+            require(dexRouters_[i].weight > 0 && dexRouters_[i].weight <= 10000, "Invalid weight");
             totalWeight += dexRouters_[i].weight;
         }
-        require(totalWeight == 100, "Weights must sum to 100");
+        require(totalWeight == 10000, "Weights must sum to 10000");
 
         address assetToken_ = router.assetToken();
         require(
@@ -240,8 +240,10 @@ contract Manager is
             string.concat(name_, "agent"), 
             ticker_,
             initialSupply,
-            address(factory),
-            address(this)
+            address(this),
+            factory.buyTax(),
+            factory.sellTax(),
+            factory.taxVault()
         );
         uint256 supply = actualToken.totalSupply();
 
@@ -336,7 +338,7 @@ contract Manager is
         uint256 totalSupply = IERC20(tokenAddress_).totalSupply();
         require(totalSupply > 0, "Invalid total supply");
 
-        uint256 reservePercentage = (newReserveA * 100) / totalSupply;
+        uint256 reservePercentage = (newReserveA * 10000) / totalSupply;
         
         if (reservePercentage <= gradThresholdPercent) {
             _graduate(tokenAddress_);
@@ -499,8 +501,8 @@ contract Manager is
         address[] memory newPairs = new address[](dexRouters_.length);
 
         for (uint i = 0; i < dexRouters_.length; i++) {
-            uint256 tokenAmount = (totalTokens_ * dexRouters_[i].weight) / 100;
-            uint256 assetAmount = (totalAssets_ * dexRouters_[i].weight) / 100;
+            uint256 tokenAmount = (totalTokens_ * dexRouters_[i].weight) / 10000;
+            uint256 assetAmount = (totalAssets_ * dexRouters_[i].weight) / 10000;
 
             IUniswapV2Router02 dexRouter = IUniswapV2Router02(dexRouters_[i].routerAddress);
 

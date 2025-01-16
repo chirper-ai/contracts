@@ -105,7 +105,7 @@ contract Router is
         require(amountIn_ > 0, "Invalid amount");
         
         // check max transaction percent by total supply
-        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 100;
+        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 10000;
 
         // check max transaction amount
         require(amountIn_ <= maxTxAmount, "Exceeds max transaction");
@@ -154,7 +154,7 @@ contract Router is
         require(to_ != address(0), "Invalid recipient");
         
         // check max transaction percent by total supply
-        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 100;
+        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 10000;
 
         // check max transaction amount
         require(amountIn_ <= maxTxAmount, "Exceeds max transaction");
@@ -243,7 +243,7 @@ contract Router is
     function setMaxTxPercent(uint256 maxTxPercent_) external onlyRole(ADMIN_ROLE) {
         // Ensure max transaction is within acceptable bounds
         require(maxTxPercent_ > 0, "Invalid amount");
-        require(maxTxPercent_ <= 100, "Exceeds 100%");
+        require(maxTxPercent_ <= 10000, "Exceeds 100%");
 
         maxTxPercent = maxTxPercent_;
     }

@@ -1,52 +1,35 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/Context.sol";
-import "./Factory.sol";
 
 /**
  * @title Token
- * @dev Implementation of the ERC20 token standard for AI agents with tax functionality
- * Uses Factory contract for tax rates and vault management
+ * @dev Implementation of an ERC20 token with tax functionality for AI agents
+ * Extends OpenZeppelin's ERC20 implementation with buy/sell taxes
+ * and graduated trading functionality
  */
-contract Token is Context, IERC20, Ownable {
-    /*//////////////////////////////////////////////////////////////
-                                 CONSTANTS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Token decimals (fixed at 18)
-    uint8 private constant DECIMALS = 18;
-
+contract Token is ERC20, Ownable {
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Total token supply
-    uint256 private totalTokenSupply;
+    /// @notice Buy tax percentage in basis points (1/100th of 1%)
+    uint256 public buyTax;
+    
+    /// @notice Sell tax percentage in basis points (1/100th of 1%)
+    uint256 public sellTax;
 
-    /// @notice Token name
-    string private tokenName;
-
-    /// @notice Token symbol
-    string private tokenSymbol;
-
-    /// @notice Whether the token has graduated to Uniswap
-    bool public hasGraduated;
-
-    /// @notice Factory contract reference for tax management
-    Factory public immutable factory;
+    /// @notice Tax vault address where half of all taxes are sent
+    address public taxVault;
 
     /// @notice Manager contract reference for graduation control
     address public immutable manager;
 
-    /// @notice Maps addresses to their token balances
-    mapping(address => uint256) private balances;
-
-    /// @notice Maps owner addresses to their spender allowances
-    mapping(address => mapping(address => uint256)) private allowances;
-
+    /// @notice Whether the token has graduated to Uniswap
+    bool public hasGraduated;
+    
     /// @notice Maps addresses that are excluded from taxes
     mapping(address => bool) private taxExempt;
 
@@ -57,10 +40,7 @@ contract Token is Context, IERC20, Ownable {
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Emitted when max transaction limit is updated
-    event MaxTransactionUpdated(uint256 newMaxPercent_);
-
-    /// @notice Emitted when token graduates
+    /// @notice Emitted when token graduates to trading
     event Graduated();
 
     /// @notice Emitted when pool status is updated
@@ -75,122 +55,37 @@ contract Token is Context, IERC20, Ownable {
      * @param name_ Name of the token
      * @param symbol_ Symbol of the token
      * @param initialSupply_ Initial supply in whole tokens
-     * @param factory_ Address of the factory contract
      * @param manager_ Address of the manager contract
+     * @param buyTax_ Buy tax in basis points (1/100th of 1%)
+     * @param sellTax_ Sell tax in basis points (1/100th of 1%)
+     * @param taxVault_ Address where tax is collected
      */
     constructor(
         string memory name_,
         string memory symbol_,
         uint256 initialSupply_,
-        address factory_,
-        address manager_
-    ) Ownable(msg.sender) {
-        require(factory_ != address(0), "Invalid factory");
+        address manager_,
+        uint256 buyTax_,
+        uint256 sellTax_,
+        address taxVault_
+    ) ERC20(name_, symbol_) Ownable(msg.sender) {
         require(manager_ != address(0), "Invalid manager");
+        require(buyTax_ <= 1000, "Buy tax too high");
+        require(sellTax_ <= 1000, "Sell tax too high");
 
-        factory = Factory(factory_);
         manager = manager_;
-        tokenName = name_;
-        tokenSymbol = symbol_;
-        totalTokenSupply = initialSupply_ * 10 ** DECIMALS;
+        buyTax = buyTax_;
+        sellTax = sellTax_;
+        taxVault = taxVault_;
         
-        balances[_msgSender()] = totalTokenSupply;
+        _mint(msg.sender, initialSupply_ * 10 ** decimals());
         
-        taxExempt[_msgSender()] = true;
+        taxExempt[msg.sender] = true;
         taxExempt[address(this)] = true;
-        
-        emit Transfer(address(0), _msgSender(), totalTokenSupply);
     }
 
     /*//////////////////////////////////////////////////////////////
-                          VIEW FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Returns the token name
-    function name() public view returns (string memory) {
-        return tokenName;
-    }
-
-    /// @notice Returns the token symbol
-    function symbol() public view returns (string memory) {
-        return tokenSymbol;
-    }
-
-    /// @notice Returns the number of decimals (18)
-    function decimals() public pure returns (uint8) {
-        return DECIMALS;
-    }
-
-    /// @notice Returns the total token supply
-    function totalSupply() public view override returns (uint256) {
-        return totalTokenSupply;
-    }
-
-    /// @notice Returns the token balance of an account
-    function balanceOf(address account_) public view override returns (uint256) {
-        return balances[account_];
-    }
-
-    /// @notice Returns the remaining allowance for a spender
-    function allowance(
-        address owner_,
-        address spender_
-    ) public view override returns (uint256) {
-        return allowances[owner_][spender_];
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                         TOKEN OPERATIONS
-    //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice Transfers tokens to a recipient
-     * @param recipient_ Address receiving the tokens
-     * @param amount_ Amount of tokens to transfer
-     */
-    function transfer(
-        address recipient_,
-        uint256 amount_
-    ) public override returns (bool) {
-        _update(_msgSender(), recipient_, amount_);
-        return true;
-    }
-
-    /**
-     * @notice Approves a spender to spend tokens
-     * @param spender_ Address to approve
-     * @param amount_ Amount of tokens to approve
-     */
-    function approve(
-        address spender_,
-        uint256 amount_
-    ) public override returns (bool) {
-        _approve(_msgSender(), spender_, amount_);
-        return true;
-    }
-
-    /**
-     * @notice Transfers tokens from one address to another
-     * @param sender_ Address sending the tokens
-     * @param recipient_ Address receiving the tokens
-     * @param amount_ Amount of tokens to transfer
-     */
-    function transferFrom(
-        address sender_,
-        address recipient_,
-        uint256 amount_
-    ) public override returns (bool) {
-        _update(sender_, recipient_, amount_);
-        _approve(
-            sender_,
-            _msgSender(),
-            allowances[sender_][_msgSender()] - amount_
-        );
-        return true;
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                         OWNER FUNCTIONS
+                         MANAGER FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /**
@@ -205,9 +100,7 @@ contract Token is Context, IERC20, Ownable {
      * @notice Sets the graduated status and registers multiple pools (can only be set once by manager)
      * @param pools_ Array of pool contract addresses
      */
-    function graduate(
-        address[] memory pools_
-    ) external onlyManager {
+    function graduate(address[] memory pools_) external onlyManager {
         require(!hasGraduated, "Already graduated");
         require(pools_.length > 0, "Must provide at least one pool");
         
@@ -221,6 +114,10 @@ contract Token is Context, IERC20, Ownable {
         
         emit Graduated();
     }
+
+    /*//////////////////////////////////////////////////////////////
+                         OWNER FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
 
     /**
      * @notice Excludes an address from taxes
@@ -243,15 +140,24 @@ contract Token is Context, IERC20, Ownable {
     }
 
     /**
-     * @notice Burns tokens from an address
-     * @param account_ Address to burn from
-     * @param amount_ Amount to burn
+     * @notice Sets the tax parameters for the token
+     * @param buyTax_ Buy tax percentage in basis points (1/100th of 1%)
+     * @param sellTax_ Sell tax percentage in basis points (1/100th of 1%)
      */
-    function burnFrom(address account_, uint256 amount_) external onlyOwner {
-        require(account_ != address(0), "Invalid address");
-        balances[account_] = balances[account_] - amount_;
-        totalTokenSupply = totalTokenSupply - amount_;
-        emit Transfer(account_, address(0), amount_);
+    function setTaxParameters(uint256 buyTax_, uint256 sellTax_) external onlyOwner {
+        require(buyTax_ <= 1000, "Buy tax too high");
+        require(sellTax_ <= 1000, "Sell tax too high");
+        buyTax = buyTax_;
+        sellTax = sellTax_;
+    }
+
+    /**
+     * @notice Sets the tax vault address
+     * @param taxVault_ Address of the tax vault
+     */
+    function setTaxVault(address taxVault_) external onlyOwner {
+        require(taxVault_ != address(0), "Invalid tax vault");
+        taxVault = taxVault_;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -275,82 +181,39 @@ contract Token is Context, IERC20, Ownable {
             return 0;
         }
 
-        uint256 taxRate;
         if (isPool[from_]) {
             // Buy tax
-            taxRate = factory.buyTax();
+            return (amount_ * buyTax) / 10000;
         } else if (isPool[to_]) {
             // Sell tax
-            taxRate = factory.sellTax();
-        } else {
-            // No tax on wallet transfers
-            return 0;
+            return (amount_ * sellTax) / 10000;
         }
-
-        // Safe tax calculation
-        // taxRate is in basis points (max 10000)
-        // This calculation cannot overflow as amount_ * 10000 would have to be > 2^256
-        // for this to be possible
-        return (amount_ * taxRate) / 10000;
+        
+        // No tax on wallet transfers
+        return 0;
     }
 
     /**
-     * @notice Internal function to approve token spending
-     * @param owner_ Address approving the spend
-     * @param spender_ Address being approved
-     * @param amount_ Amount being approved
-     */
-    function _approve(
-        address owner_,
-        address spender_,
-        uint256 amount_
-    ) private {
-        require(owner_ != address(0), "Invalid owner");
-        require(spender_ != address(0), "Invalid spender");
-
-        allowances[owner_][spender_] = amount_;
-        emit Approval(owner_, spender_, amount_);
-    }
-
-    /**
-     * @notice Internal function to transfer tokens
-     * @param from_ Address sending tokens
-     * @param to_ Address receiving tokens
-     * @param amount_ Amount of tokens to transfer
+     * @notice Override of the ERC20 _update function to handle tax collection
+     * @param from Address sending tokens
+     * @param to Address receiving tokens
+     * @param amount Amount of tokens to transfer
      */
     function _update(
-        address from_,
-        address to_,
-        uint256 amount_
-    ) private {
-        require(from_ != address(0), "Invalid sender");
-        require(to_ != address(0), "Invalid recipient");
-        require(amount_ > 0, "Invalid amount");
-
-        // Calculate tax first
-        uint256 taxAmount = _calculateTax(from_, to_, amount_);
-        uint256 finalAmount = amount_ - taxAmount;
-
-        // Ensure sender has enough balance for full amount including tax
-        require(balances[from_] >= amount_, "Insufficient balance");
-
-        // Update sender balance first
-        balances[from_] = balances[from_] - amount_;
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual override {
+        uint256 taxAmount = _calculateTax(from, to, amount);
+        uint256 finalAmount = amount - taxAmount;
 
         if (taxAmount > 0) {
-            address taxVault_ = factory.taxVault();
+            // Split tax between vault and owner
             uint256 halfTax = taxAmount / 2;
-            
-            // Update tax recipient balances
-            balances[taxVault_] += halfTax;
-            emit Transfer(from_, taxVault_, halfTax);
-
-            balances[owner()] += (taxAmount - halfTax);
-            emit Transfer(from_, owner(), taxAmount - halfTax);
+            super._update(from, taxVault, halfTax);
+            super._update(from, owner(), taxAmount - halfTax);
         }
 
-        // Update recipient balance
-        balances[to_] += finalAmount;
-        emit Transfer(from_, to_, finalAmount);
+        super._update(from, to, finalAmount);
     }
 }

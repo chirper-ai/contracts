@@ -17,8 +17,10 @@ describe("Token", function() {
       "Test Token",
       "TEST",
       "1000000", // 1M tokens
-      await context.factory.getAddress(),
-      await context.owner.getAddress() // owner as manager
+      await context.owner.getAddress(), // owner as manager
+      100,
+      100,
+      await context.owner.getAddress()
     );
     await token.waitForDeployment();
   });
@@ -36,8 +38,7 @@ describe("Token", function() {
         .to.equal(await token.totalSupply());
     });
 
-    it("should set correct factory and manager", async function() {
-      expect(await token.factory()).to.equal(await context.factory.getAddress());
+    it("should set correct manager", async function() {
       expect(await token.manager()).to.equal(await context.owner.getAddress());
     });
   });

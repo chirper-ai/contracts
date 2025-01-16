@@ -20,7 +20,7 @@ describe("Manager", function() {
       expect(Number(await factory.launchTax())).to.equal(500); // 5%
       expect(Number(await manager.initialSupply())).to.equal(1_000_000);
       expect(Number(await manager.assetRate())).to.equal(10_000);
-      expect(Number(await manager.gradThresholdPercent())).to.equal(50);
+      expect(Number(await manager.gradThresholdPercent())).to.equal(5000);
     });
 
     it("should have correct owner", async function() {
@@ -190,7 +190,7 @@ describe("Manager", function() {
       // Launch with DEX router
       const dexRouters = [{
         routerAddress: await uniswapRouter.getAddress(),
-        weight: 100
+        weight: 10000
       }];
       
       const agentToken = await createToken(context, alice, dexRouters);

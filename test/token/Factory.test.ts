@@ -39,8 +39,10 @@ describe("Factory", function() {
         "Test Agent",
         "TEST",
         "1000000",
-        await factory.getAddress(),
-        await alice.getAddress()  // manager address
+        await alice.getAddress(),  // manager address
+        100,
+        100,
+        alice.getAddress()
       );
       await agentToken.waitForDeployment();
 
@@ -69,7 +71,9 @@ describe("Factory", function() {
         "TEST",
         "1000000",
         await factory.getAddress(),
-        await alice.getAddress()
+        100,
+        100,
+        alice.getAddress()
       );
       await agentToken.waitForDeployment();
 
