@@ -8,8 +8,10 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 import "./Factory.sol";
-import "./IPair.sol";
 import "./Token.sol";
+
+// bonding pair
+import "../interfaces/IBondingPair.sol";
 
 /**
  * @title Router
@@ -119,8 +121,8 @@ contract Router is
 
         uint256 amountOut = _getAmountsOut(tokenAddress_, assetToken, finalAmount);
 
-        IPair(pair).transferTo(to_, amountOut);
-        IPair(pair).swap(0, amountOut, finalAmount, 0);
+        IBondingPair(pair).transferTo(to_, amountOut);
+        IBondingPair(pair).swap(0, amountOut, finalAmount, 0);
 
         return (finalAmount, amountOut);
     }
@@ -145,7 +147,7 @@ contract Router is
         require(!token.hasGraduated(), "Token graduated");
 
         address pairAddress = factory.getPair(tokenAddress_, assetToken);
-        IPair pair = IPair(pairAddress);
+        IBondingPair pair = IBondingPair(pairAddress);
         
         uint256 amountOut = _getAmountsOut(tokenAddress_, address(0), amountIn_);
         IERC20(tokenAddress_).safeTransferFrom(to_, pairAddress, amountIn_);
@@ -184,7 +186,7 @@ contract Router is
         require(tokenAddress_ != address(0), "Invalid token");
 
         address pairAddress = factory.getPair(tokenAddress_, assetToken);
-        IPair pair = IPair(pairAddress);
+        IBondingPair pair = IBondingPair(pairAddress);
 
         IERC20(tokenAddress_).safeTransferFrom(msg.sender, pairAddress, amountToken_);
         pair.mint(amountToken_, amountAsset_);
@@ -206,11 +208,11 @@ contract Router is
         
         address pair = factory.getPair(tokenAddress_, assetToken);
         
-        uint256 assetBalance = IPair(pair).assetBalance();
-        uint256 agentBalance = IPair(pair).balance();
+        uint256 assetBalance = IBondingPair(pair).assetBalance();
+        uint256 agentBalance = IBondingPair(pair).balance();
         
-        IPair(pair).transferAsset(msg.sender, assetBalance);
-        IPair(pair).transferTo(msg.sender, agentBalance);
+        IBondingPair(pair).transferAsset(msg.sender, assetBalance);
+        IBondingPair(pair).transferTo(msg.sender, agentBalance);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -251,7 +253,7 @@ contract Router is
         require(token_ != address(0), "Invalid token");
 
         address pairAddress = factory.getPair(token_, assetToken);
-        IPair pair = IPair(pairAddress);
+        IBondingPair pair = IBondingPair(pairAddress);
         
         (uint256 reserveA, uint256 reserveB) = pair.getReserves();
         uint256 k = pair.kLast();
@@ -281,6 +283,6 @@ contract Router is
         uint256 amount_
     ) external onlyRole(EXECUTOR_ROLE) nonReentrant {
         require(spender_ != address(0), "Invalid spender");
-        IPair(pair_).approval(spender_, asset_, amount_);
+        IBondingPair(pair_).approval(spender_, asset_, amount_);
     }
 }

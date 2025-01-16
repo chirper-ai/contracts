@@ -5,7 +5,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
-import "./Pair.sol";
+import "./BondingPair.sol";
 
 /**
  * @title Factory
@@ -226,7 +226,7 @@ contract Factory is
         require(router != address(0), "Router not set");
         require(pairs[agentToken_][assetToken_] == address(0), "Pair exists");
 
-        Pair pair = new Pair(router, agentToken_, assetToken_);
+        BondingPair pair = new BondingPair(router, agentToken_, assetToken_);
         address pairAddress = address(pair);
 
         pairs[agentToken_][assetToken_] = pairAddress;

@@ -94,7 +94,7 @@ describe("Manager", function() {
       const agentToken = await createToken(context, alice);
       
       // Get initial reserves
-      const pair = await ethers.getContractAt("IPair", await factory.getPair(await agentToken.getAddress(), await assetToken.getAddress()));
+      const pair = await ethers.getContractAt("IBondingPair", await factory.getPair(await agentToken.getAddress(), await assetToken.getAddress()));
       const [initialReserveAgent, initialReserveAsset] = await pair.getReserves();
       const initialK = initialReserveAgent * initialReserveAsset;
       
@@ -119,7 +119,7 @@ describe("Manager", function() {
       const agentToken = await createToken(context, alice);
       
       // Get initial reserves
-      const pair = await ethers.getContractAt("IPair", await factory.getPair(await agentToken.getAddress(), await assetToken.getAddress()));
+      const pair = await ethers.getContractAt("IBondingPair", await factory.getPair(await agentToken.getAddress(), await assetToken.getAddress()));
       const [reserveAgent, reserveAsset] = await pair.getReserves();
       
       // Calculate expected output using constant product formula
@@ -148,7 +148,7 @@ describe("Manager", function() {
       const agentToken = await createToken(context, alice);
       
       // Get initial state
-      const pair = await ethers.getContractAt("IPair", await factory.getPair(await agentToken.getAddress(), await assetToken.getAddress()));
+      const pair = await ethers.getContractAt("IBondingPair", await factory.getPair(await agentToken.getAddress(), await assetToken.getAddress()));
       const [initialReserveAgent, initialReserveAsset] = await pair.getReserves();
       
       // Calculate initial price properly scaled

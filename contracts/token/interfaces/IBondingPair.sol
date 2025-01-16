@@ -3,10 +3,10 @@
 pragma solidity ^0.8.20;
 
 /**
- * @title IPair
+ * @title IBondingPair
  * @dev Interface for chirper.build liquidity pair contracts
  */
-interface IPair {
+interface IBondingPair {
     /**
      * @notice Gets the current reserves of the pair
      * @return Agent token reserve and asset token reserve

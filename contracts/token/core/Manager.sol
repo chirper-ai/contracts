@@ -13,9 +13,11 @@ import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
 import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 
 import "./Factory.sol";
-import "./IPair.sol";
 import "./Router.sol";
 import "./Token.sol";
+
+// interfaces
+import "../interfaces/IBondingPair.sol";
 
 /**
  * @title Manager
@@ -321,7 +323,7 @@ contract Manager is
             router.assetToken()
         );
 
-        IPair pair = IPair(pairAddress);
+        IBondingPair pair = IBondingPair(pairAddress);
         (uint256 reserveA, uint256 reserveB) = pair.getReserves();
 
         (uint256 amount1In, uint256 amount0Out) = router.buy(
@@ -369,7 +371,7 @@ contract Manager is
             router.assetToken()
         );
 
-        IPair pair = IPair(pairAddress);
+        IBondingPair pair = IBondingPair(pairAddress);
         (uint256 reserveA, uint256 reserveB) = pair.getReserves();
         
         (uint256 amount0In, uint256 amount1Out) = router.sell(
@@ -470,7 +472,7 @@ contract Manager is
         TokenData storage token = agentTokens[tokenAddress_];
         address assetTokenAddr = router.assetToken();
         
-        IPair pair = IPair(token.bondingPair);
+        IBondingPair pair = IBondingPair(token.bondingPair);
         tokenBalance = pair.balance();
         assetBalance = pair.assetBalance();
         require(tokenBalance > 0 && assetBalance > 0, "No liquidity to graduate");
