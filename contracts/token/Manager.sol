@@ -9,6 +9,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
+import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
 import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 
 import "./Factory.sol";
@@ -39,9 +40,6 @@ contract Manager is
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Uniswap V2 Router contract interface
-    IUniswapV2Router02 public uniswapRouter;
-
     /// @notice Maximum transaction percentage (1-100)
     uint256 public maxTxPercent;
 
@@ -63,6 +61,12 @@ contract Manager is
     /*//////////////////////////////////////////////////////////////
                                   STRUCTS
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice Router information for token graduation
+    struct DexRouter {
+        address routerAddress;  // Address of the DEX router
+        uint256 weight;        // Weight for liquidity distribution (1-100)
+    }
 
     /**
      * @notice Comprehensive metrics tracking for an agent token
@@ -96,26 +100,29 @@ contract Manager is
 
     /**
      * @notice Comprehensive data structure for an AI agent token
-     * @param creator Address that created the token
+     * @param creator Address of the token creator
      * @param token Address of the token contract
-     * @param pair Address of the primary trading pair
-     * @param prompt Description of the agent's behavior
-     * @param intention Stated purpose of the agent
-     * @param url Reference URL for the agent
-     * @param metrics Current token metrics
-     * @param isTrading Whether trading is currently enabled
-     * @param hasGraduated Whether token has graduated to Uniswap
+     * @param intention Purpose of the token
+     * @param url Reference URL for the token
+     * @param metrics Comprehensive token metrics
+     * @param isTrading Whether the token is currently trading
+     * @param hasGraduated Whether the token has graduated to DEXes
+     * @param bondingPair Address of the bonding curve pair
+     * @param dexRouters Array of DEX routers and their weights
+     * @param dexPairs Array of DEX pairs created during graduation
+     * @param dexPairs This is at the end
      */
     struct TokenData {
         address creator;
         address token;
-        address pair;
-        string prompt;
         string intention;
         string url;
         TokenMetrics metrics;
         bool isTrading;
         bool hasGraduated;
+        address bondingPair;     
+        DexRouter[] dexRouters; 
+        address[] dexPairs;      // This is at the end
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -159,7 +166,6 @@ contract Manager is
      * @param assetRateValue_ Asset rate for calculations
      * @param gradThresholdPercent_ Graduation threshold percentage
      * @param maxTxPercent_ Maximum transaction percentage
-     * @param uniswapRouterAddress_ Address of Uniswap V2 Router
      */
     function initialize(
         address factory_,
@@ -167,8 +173,7 @@ contract Manager is
         uint256 initSupply_,
         uint256 assetRateValue_,
         uint256 gradThresholdPercent_,
-        uint256 maxTxPercent_,
-        address uniswapRouterAddress_
+        uint256 maxTxPercent_
     ) external initializer {
         __Ownable_init(msg.sender);
         __ReentrancyGuard_init();
@@ -183,7 +188,6 @@ contract Manager is
         assetRate = assetRateValue_;
         gradThresholdPercent = gradThresholdPercent_;
         maxTxPercent = maxTxPercent_;
-        uniswapRouter = IUniswapV2Router02(uniswapRouterAddress_);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -194,7 +198,6 @@ contract Manager is
      * @notice Creates and launches a new agent token
      * @param name_ Base name for the token
      * @param ticker_ Trading symbol
-     * @param prompt_ Agent's behavioral description
      * @param intention_ Agent's purpose
      * @param url_ Reference URL
      * @param purchaseAmount_ Initial purchase amount
@@ -205,11 +208,21 @@ contract Manager is
     function launch(
         string memory name_,
         string memory ticker_,
-        string memory prompt_,
         string memory intention_,
         string memory url_,
-        uint256 purchaseAmount_
+        uint256 purchaseAmount_,
+        DexRouter[] memory dexRouters_
     ) external nonReentrant returns (address token, address pair, uint256 index) {
+        require(dexRouters_.length > 0, "Must provide at least one DEX router");
+        
+        uint256 totalWeight;
+        for(uint i = 0; i < dexRouters_.length; i++) {
+            require(dexRouters_[i].routerAddress != address(0), "Invalid router address");
+            require(dexRouters_[i].weight > 0 && dexRouters_[i].weight <= 100, "Invalid weight");
+            totalWeight += dexRouters_[i].weight;
+        }
+        require(totalWeight == 100, "Weights must sum to 100");
+
         address assetToken_ = router.assetToken();
         require(
             IERC20(assetToken_).balanceOf(msg.sender) >= purchaseAmount_,
@@ -238,7 +251,7 @@ contract Manager is
         );
         uint256 supply = actualToken.totalSupply();
 
-        address newPair = factory.createPair(address(actualToken), assetToken_);
+        address newBondingPair = factory.createPair(address(actualToken), assetToken_);
 
         require(_approve(address(router), address(actualToken), supply));
 
@@ -265,13 +278,14 @@ contract Manager is
         TokenData memory localToken = TokenData({
             creator: msg.sender,
             token: address(actualToken),
-            pair: newPair,
-            prompt: prompt_,
+            bondingPair: newBondingPair,
             intention: intention_,
             url: url_,
             metrics: metrics,
             isTrading: true,
-            hasGraduated: false
+            hasGraduated: false,
+            dexRouters: dexRouters_,
+            dexPairs: new address[](0)
         });
 
         agentTokens[address(actualToken)] = localToken;
@@ -279,13 +293,13 @@ contract Manager is
 
         uint256 tokenIndex = agentTokenList.length;
 
-        emit Launched(address(actualToken), newPair, tokenIndex);
+        emit Launched(address(actualToken), newBondingPair, tokenIndex);
 
         IERC20(assetToken_).forceApprove(address(router), initialPurchase);
         router.buy(initialPurchase, address(actualToken), address(this));
         actualToken.transfer(msg.sender, actualToken.balanceOf(address(this)));
 
-        return (address(actualToken), newPair, tokenIndex);
+        return (address(actualToken), newBondingPair, tokenIndex);
     }
 
     /**
@@ -415,21 +429,50 @@ contract Manager is
     }
 
     /**
-     * @notice Internal function to handle token graduation to Uniswap
+     * @notice Internal function to handle token graduation to DEXes
      * @param tokenAddress_ Address of token to graduate
      */
     function _graduate(address tokenAddress_) private {
         TokenData storage token = agentTokens[tokenAddress_];
         require(token.isTrading && !token.hasGraduated, "Invalid graduation state");
 
-        address bondingPair = factory.getPair(tokenAddress_, router.assetToken());
+        // Extract liquidity from bonding curve
+        (uint256 tokenBalance, uint256 assetBalance) = _extractBondingCurveLiquidity(tokenAddress_);
+        
+        // Deploy to DEXes and store the pairs
+        address[] memory newPairs = _deployToDexes(
+            tokenAddress_,
+            token.dexRouters,
+            tokenBalance,
+            assetBalance
+        );
+
+        // Update token data with new pairs
+        token.dexPairs = newPairs;
+        token.isTrading = false;
+        token.hasGraduated = true;
+
+        emit Graduated(tokenAddress_);
+    }
+
+    /**
+     * @notice Extracts liquidity from the bonding curve pair
+     * @param tokenAddress_ Address of the token
+     * @return tokenBalance Amount of tokens extracted
+     * @return assetBalance Amount of asset tokens extracted
+     */
+    function _extractBondingCurveLiquidity(
+        address tokenAddress_
+    ) private returns (uint256 tokenBalance, uint256 assetBalance) {
+        TokenData storage token = agentTokens[tokenAddress_];
         address assetTokenAddr = router.assetToken();
         
-        IPair pair = IPair(bondingPair);
-        uint256 tokenBalance = pair.balance();
-        uint256 assetBalance = pair.assetBalance();
+        IPair pair = IPair(token.bondingPair);
+        tokenBalance = pair.balance();
+        assetBalance = pair.assetBalance();
         require(tokenBalance > 0 && assetBalance > 0, "No liquidity to graduate");
 
+        // Note: This now just extracts liquidity, graduation happens later
         router.graduate(tokenAddress_);
 
         require(
@@ -438,44 +481,77 @@ contract Manager is
             "Failed to receive tokens"
         );
 
-        IERC20(tokenAddress_).forceApprove(address(uniswapRouter), tokenBalance);
-        IERC20(assetTokenAddr).forceApprove(address(uniswapRouter), assetBalance);
-        
-        address uniswapFactory = uniswapRouter.factory();
-        address uniswapPair = IUniswapV2Factory(uniswapFactory).getPair(tokenAddress_, assetTokenAddr);
-        
-        if (uniswapPair == address(0)) {
-            uniswapPair = IUniswapV2Factory(uniswapFactory).createPair(tokenAddress_, assetTokenAddr);
-        }
-        require(uniswapPair != address(0), "Failed to get/create Uniswap pair");
+        return (tokenBalance, assetBalance);
+    }
 
-        // Set token as graduated
-        Token(tokenAddress_).graduate(uniswapPair);
+    /**
+     * @notice Deploys liquidity to multiple DEXes according to weights
+     * @param tokenAddress_ Address of the token
+     * @param dexRouters_ Array of DEX routers and their weights
+     * @param totalTokens_ Total tokens to distribute
+     * @param totalAssets_ Total asset tokens to distribute
+     * @return pairs Array of created DEX pairs
+     */
+    function _deployToDexes(
+        address tokenAddress_,
+        DexRouter[] memory dexRouters_,
+        uint256 totalTokens_,
+        uint256 totalAssets_
+    ) private returns (address[] memory pairs) {
+        address assetTokenAddr = router.assetToken();
+        
+        address[] memory newPairs = new address[](dexRouters_.length);
 
-        (uint256 amountToken, uint256 amountAsset, uint256 liquidity) = 
-            uniswapRouter.addLiquidity(
+        for (uint i = 0; i < dexRouters_.length; i++) {
+            uint256 tokenAmount = (totalTokens_ * dexRouters_[i].weight) / 100;
+            uint256 assetAmount = (totalAssets_ * dexRouters_[i].weight) / 100;
+
+            IUniswapV2Router02 dexRouter = IUniswapV2Router02(dexRouters_[i].routerAddress);
+
+            IERC20(tokenAddress_).forceApprove(address(dexRouter), tokenAmount);
+            IERC20(assetTokenAddr).forceApprove(address(dexRouter), assetAmount);
+
+            address dexFactory = dexRouter.factory();
+            
+            address dexPair = IUniswapV2Factory(dexFactory).getPair(
                 tokenAddress_,
-                assetTokenAddr,
-                tokenBalance,
-                assetBalance,
-                tokenBalance * 95 / 100,
-                assetBalance * 95 / 100,
-                address(0),
-                block.timestamp + 3600
+                assetTokenAddr
             );
+
+            if (dexPair == address(0)) {
+                dexPair = IUniswapV2Factory(dexFactory).createPair(
+                    tokenAddress_,
+                    assetTokenAddr
+                );
+            }
+            
+            require(dexPair != address(0), "Failed to get/create DEX pair");
+            
+            (uint256 amountToken, uint256 amountAsset, uint256 liquidity) = 
+                dexRouter.addLiquidity(
+                    tokenAddress_,
+                    assetTokenAddr,
+                    tokenAmount,
+                    assetAmount,
+                    tokenAmount * 95 / 100,
+                    assetAmount * 95 / 100,
+                    address(0),
+                    block.timestamp + 3600
+                );
+
+            require(
+                amountToken >= tokenAmount * 95 / 100 &&
+                amountAsset >= assetAmount * 95 / 100 &&
+                liquidity > 0,
+                "Liquidity addition failed requirements"
+            );
+
+            newPairs[i] = dexPair;
+        }
         
-        require(
-            amountToken >= tokenBalance * 95 / 100 &&
-            amountAsset >= assetBalance * 95 / 100 &&
-            liquidity > 0,
-            "Liquidity addition failed"
-        );
+        Token(tokenAddress_).graduate(newPairs);
 
-        token.isTrading = false;
-        token.hasGraduated = true;
-        token.pair = uniswapPair;
-
-        emit Graduated(tokenAddress_);
+        return newPairs;
     }
 
     /**

@@ -2,21 +2,23 @@ const { ethers, upgrades, network, run } = require("hardhat");
 
 async function main() {
   const [deployer] = await ethers.getSigners();
+  console.log("Network:", network.name);
   console.log("Deploying contracts with account:", deployer.address);
+  console.log("Account balance:", (await deployer.provider.getBalance(deployer.address)).toString());
 
   // Initial parameters
   const TAX_VAULT = deployer.address; // Set your tax vault address
-  const INITIAL_BUY_TAX = 200; // 2% in basis points
-  const INITIAL_SELL_TAX = 300; // 3% in basis points
-  const INITIAL_LAUNCH_TAX = 500; // 5% in basis points
+  const INITIAL_BUY_TAX = 100; // 1% in basis points
+  const INITIAL_SELL_TAX = 100; // 1% in basis points
+  const INITIAL_LAUNCH_TAX = 2500; // 25% in basis points
   const INITIAL_SUPPLY = 1_000_000; // 1M tokens
   const ASSET_RATE = 10_000; // Rate for asset requirements
   const GRAD_THRESHOLD_PERCENT = 50; // 50% threshold for graduation
   const MAX_TX_PERCENT = 100; // 100% max transaction size (no limit)
 
-  // Known addresses
-  const UNISWAP_ROUTER_ADDRESS = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"; // Uniswap V2 Router
-  const ASSET_TOKEN_ADDRESS = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"; // USDC
+  // Use VANA (native token) and DEX addresses on moksha testnet
+  const UNISWAP_ROUTER_ADDRESS = "0x0000000000000000000000000000000000000000"; // TODO: Replace with actual DEX router on moksha
+  const ASSET_TOKEN_ADDRESS = ethers.ZeroAddress; // Using ZeroAddress to represent native token (VANA)
 
   console.log("Deploying Factory...");
   const Factory = await ethers.getContractFactory("Factory");
@@ -33,7 +35,7 @@ async function main() {
   const Router = await ethers.getContractFactory("Router");
   const router = await upgrades.deployProxy(Router, [
     await factory.getAddress(),
-    ASSET_TOKEN_ADDRESS
+    ASSET_TOKEN_ADDRESS  // Using zero address for native token
   ]);
   await router.waitForDeployment();
   console.log("Router deployed to:", await router.getAddress());
@@ -58,6 +60,7 @@ async function main() {
   // Factory setup
   const CREATOR_ROLE = await factory.CREATOR_ROLE();
   const ADMIN_ROLE = await factory.ADMIN_ROLE();
+  await factory.grantRole(ADMIN_ROLE, await manager.getAddress());
   await factory.grantRole(CREATOR_ROLE, await manager.getAddress());
   await factory.setRouter(await router.getAddress());
 
@@ -72,24 +75,27 @@ async function main() {
     manager: await manager.getAddress(),
   });
 
-  // Verify contracts on Etherscan
-  if (network.name !== "hardhat" && network.name !== "localhost") {
-    console.log("Verifying contracts on Etherscan...");
-    
-    await run("verify:verify", {
-      address: await factory.getAddress(),
-      constructorArguments: []
-    });
+  // Verify contracts on VANAScan
+  if (network.name === "moksha") {
+    console.log("Verifying contracts on VANAScan...");
+    try {
+      await run("verify:verify", {
+        address: await factory.getAddress(),
+        constructorArguments: []
+      });
 
-    await run("verify:verify", {
-      address: await router.getAddress(),
-      constructorArguments: []
-    });
+      await run("verify:verify", {
+        address: await router.getAddress(),
+        constructorArguments: []
+      });
 
-    await run("verify:verify", {
-      address: await manager.getAddress(),
-      constructorArguments: []
-    });
+      await run("verify:verify", {
+        address: await manager.getAddress(),
+        constructorArguments: []
+      });
+    } catch (error) {
+      console.log("Verification error:", error);
+    }
   }
 }
 

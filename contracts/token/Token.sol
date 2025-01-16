@@ -225,21 +225,26 @@ contract Token is Context, IERC20, Ownable {
     }
 
     /**
-     * @notice Sets the graduated status (can only be set once by manager)
-     * @param pair_ Address of the pair contract
+     * @notice Sets the graduated status and registers multiple pairs (can only be set once by manager)
+     * @param pairs_ Array of pair contract addresses
      */
     function graduate(
-        address pair_
+        address[] memory pairs_
     ) external onlyManager {
         require(!hasGraduated, "Already graduated");
-        require(pair_ != address(0), "Invalid pair address");
+        require(pairs_.length > 0, "Must provide at least one pair");
         
         hasGraduated = true;
-        isPair[pair_] = true;
         
-        emit PairUpdated(pair_, true);
+        for(uint i = 0; i < pairs_.length; i++) {
+            require(pairs_[i] != address(0), "Invalid pair address");
+            isPair[pairs_[i]] = true;
+            emit PairUpdated(pairs_[i], true);
+        }
+        
         emit Graduated();
     }
+
     /**
      * @notice Excludes an address from transaction limits
      * @param account_ Address to exclude

@@ -26,6 +26,9 @@ importers:
       '@uniswap/v2-periphery':
         specifier: 1.1.0-beta.0
         version: 1.1.0-beta.0
+      dotenv:
+        specifier: ^16.4.7
+        version: 16.4.7
       ethers:
         specifier: ^6.13.5
         version: 6.13.5(bufferutil@4.0.5)(utf-8-validate@5.0.7)
@@ -1221,6 +1224,10 @@ packages:
   dir-glob@3.0.1:
     resolution: {integrity: sha512-WkrWp9GR4KXfKGYzOLmTuGVi1UWFfws377n9cc55/tb6DuqyF6pcQ5AbiHEshaDpY9v6oaSr2XCDidGmMwdzIA==}
     engines: {node: '>=8'}
+
+  dotenv@16.4.7:
+    resolution: {integrity: sha512-47qPchRCykZC03FhkYAhrvwU4xDBFIj1QPqaarj6mdM/hgUzfPHcpkHJOn3mJAufFeeAxAzeGsr5X0M4k6fLZQ==}
+    engines: {node: '>=12'}
 
   dunder-proto@1.0.1:
     resolution: {integrity: sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==}
@@ -4491,6 +4498,8 @@ snapshots:
   dir-glob@3.0.1:
     dependencies:
       path-type: 4.0.0
+
+  dotenv@16.4.7: {}
 
   dunder-proto@1.0.1:
     dependencies:

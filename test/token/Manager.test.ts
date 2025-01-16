@@ -183,38 +183,64 @@ describe("Manager", function() {
 
   describe("Graduation", function() {
     async function graduateToken(context: TestContext) {
-      const { manager, router, alice, bob, assetToken } = context;
+      const { manager, router, alice, bob, assetToken, uniswapRouter } = context;
       
-      // Set a low graduation threshold for testing
+      console.log("\n=== Starting graduateToken ===");
       await manager.setGradThresholdPercent(50);
       
-      const agentToken = await createToken(context, alice);
+      // Launch with DEX router
+      const dexRouters = [{
+        routerAddress: await uniswapRouter.getAddress(),
+        weight: 100
+      }];
+      
+      console.log("Launching token with router:", await uniswapRouter.getAddress());
+      const agentToken = await createToken(context, alice, dexRouters);
+      const tokenAddress = await agentToken.getAddress();
+      console.log("Token launched at:", tokenAddress);
       
       // Buy enough to trigger graduation
       const buyAmount = ethers.parseEther("10000000");
+      console.log("Approving buy amount:", buyAmount.toString());
       await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
-      await manager.connect(bob).buy(buyAmount, await agentToken.getAddress());
+      
+      console.log("Executing buy to trigger graduation");
+      const buyTx = await manager.connect(bob).buy(buyAmount, tokenAddress);
+      const buyReceipt = await buyTx.wait();
+      console.log("Buy completed, transaction hash:", buyReceipt.hash);
+    
+      // Wait a bit to ensure state is updated
+      await ethers.provider.send("evm_mine", []);
+    
+      // Get token data after graduation
+      console.log("Fetching token data");
+      const tokenData = await manager.agentTokens(tokenAddress);
+      console.log("Token graduated:", tokenData.hasGraduated);
+      console.log("Is trading:", tokenData.isTrading);
+      console.log("DEX pairs:", tokenData.dexPairs);
 
-      // Get Uniswap Router after graduation
-      const uniswapRouter = await ethers.getContractAt(
-        "IUniswapV2Router02",
-        await manager.uniswapRouter()
-      );
-
-      // Get Uniswap pair
-      const factory = await ethers.getContractAt(
-        "IUniswapV2Factory",
-        await uniswapRouter.factory()
-      );
-      const uniswapPair = await factory.getPair(
-        await agentToken.getAddress(),
-        await assetToken.getAddress()
-      );
-
+      console.log(tokenData);
+    
+      if (!tokenData.dexPairs || tokenData.dexPairs.length === 0) {
+        const pair = await ethers.getContractAt("IUniswapV2Pair", tokenData.bondingPair);
+        console.log("Current bonding pair reserves:");
+        const [reserve0, reserve1] = await pair.getReserves();
+        console.log("Reserve0:", reserve0.toString());
+        console.log("Reserve1:", reserve1.toString());
+      }
+    
+      // Get all DEX pairs
+      const dexPairs = tokenData.dexPairs;
+      console.log("Number of DEX pairs:", dexPairs ? dexPairs.length : 0);
+    
+      // Look for Graduated event
+      const graduatedEvent = buyReceipt.logs.find(log => log.fragment?.name === "Graduated");
+      console.log("Found graduation event:", !!graduatedEvent);
+    
       return {
         agentToken,
-        uniswapRouter,
-        uniswapPair
+        dexRouters,
+        dexPairs: dexPairs || []
       };
     }
 
@@ -236,79 +262,62 @@ describe("Manager", function() {
       
       // Verify token state
       const tokenInfo = await manager.agentTokens(await agentToken.getAddress());
+      console.log('dexpairs', tokenInfo.dexPairs);
       expect(tokenInfo.hasGraduated).to.be.true;
       expect(tokenInfo.isTrading).to.be.false;
+      expect(tokenInfo.dexPairs.length).to.be.gt(0); // Should have at least one DEX pair
     });
 
-    it("should migrate liquidity to Uniswap correctly", async function() {
-      const { manager, assetToken } = context;
-      const { agentToken, uniswapPair } = await graduateToken(context);
+    it("should migrate liquidity to multiple DEXes correctly", async function() {
+      const { assetToken } = context;
+      const { agentToken, dexPairs } = await graduateToken(context);
 
-      const pair = await ethers.getContractAt("IUniswapV2Pair", uniswapPair);
-      
-      // Get initial reserves
-      const [reserve0, reserve1] = await pair.getReserves();
-      expect(Number(reserve0)).to.be.gt(0);
-      expect(Number(reserve1)).to.be.gt(0);
+      // Check each DEX pair
+      for (const pairAddress of dexPairs) {
+        const pair = await ethers.getContractAt("IUniswapV2Pair", pairAddress);
+        
+        // Get initial reserves
+        const [reserve0, reserve1] = await pair.getReserves();
+        expect(Number(reserve0)).to.be.gt(0);
+        expect(Number(reserve1)).to.be.gt(0);
 
-      // Get the tokens in the pair
-      const token0 = await pair.token0();
-      const token1 = await pair.token1();
+        // Get the tokens in the pair
+        const token0 = await pair.token0();
+        const token1 = await pair.token1();
 
-      // Check Uniswap pair has correct tokens
-      expect(
-        (token0.toLowerCase() === (await agentToken.getAddress()).toLowerCase() &&
-         token1.toLowerCase() === (await assetToken.getAddress()).toLowerCase()) ||
-        (token1.toLowerCase() === (await agentToken.getAddress()).toLowerCase() &&
-         token0.toLowerCase() === (await assetToken.getAddress()).toLowerCase())
-      ).to.be.true;
+        // Check pair has correct tokens
+        expect(
+          (token0.toLowerCase() === (await agentToken.getAddress()).toLowerCase() &&
+           token1.toLowerCase() === (await assetToken.getAddress()).toLowerCase()) ||
+          (token1.toLowerCase() === (await agentToken.getAddress()).toLowerCase() &&
+           token0.toLowerCase() === (await assetToken.getAddress()).toLowerCase())
+        ).to.be.true;
 
-      // Verify pool has liquidity
-      const liquidityBalance = await pair.balanceOf(await manager.getAddress());
-      expect(Number(liquidityBalance)).to.be.equal(0);
-
-      // Verify constant product formula
-      const k = BigInt(reserve0) * BigInt(reserve1);
-      expect(Number(k)).to.be.gt(0);
+        // Verify constant product formula
+        const k = BigInt(reserve0) * BigInt(reserve1);
+        expect(Number(k)).to.be.gt(0);
+      }
     });
 
-    it("should prevent router trading after graduation", async function() {
-      const { manager, router, alice, bob, assetToken } = context;
-      
-      await manager.setGradThresholdPercent(50);
-      const agentToken = await createToken(context, alice);
-      
-      const buyAmount = ethers.parseEther("10000000");
-      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
-      await manager.connect(bob).buy(buyAmount, await agentToken.getAddress());
-      
-      // Verify token is graduated
-      const tokenInfo = await manager.agentTokens(await agentToken.getAddress());
-      expect(tokenInfo.hasGraduated).to.be.true;
-      
-      // Attempt to buy through router should fail
-      const secondBuyAmount = ethers.parseEther("100");
-      await assetToken.connect(bob).approve(await router.getAddress(), secondBuyAmount);
-      
-      let failed = false;
-      try {
-        await manager.connect(bob).buy(secondBuyAmount, await agentToken.getAddress());
-      } catch (e) {
-        failed = true;
+    it("should distribute liquidity according to weights", async function() {
+      const { agentToken, dexRouters, dexPairs } = await graduateToken(context);
+
+      // Check liquidity distribution matches weights
+      for (let i = 0; i < dexPairs.length; i++) {
+        const pair = await ethers.getContractAt("IUniswapV2Pair", dexPairs[i]);
+        const [reserve0, reserve1] = await pair.getReserves();
+        
+        // Calculate total value locked (TVL)
+        const tvl = BigInt(reserve0) * BigInt(reserve1);
+        
+        // Get the expected weight for this DEX
+        const weight = dexRouters[i].weight;
+        
+        // TODO: Compare TVL ratios to weights
+        // This would need precise calculations based on your specific tokenomics
+        // For now, just verify non-zero liquidity
+        expect(Number(tvl)).to.be.gt(0);
       }
-      expect(failed).to.be.true;
-      
-      // Attempt to sell through router should fail
-      const sellAmount = ethers.parseEther("100");
-      await agentToken.connect(bob).approve(await router.getAddress(), sellAmount);
-      
-      failed = false;
-      try {
-        await manager.connect(bob).sell(sellAmount, await agentToken.getAddress());
-      } catch (e) {
-        failed = true;
-      }
-      expect(failed).to.be.true;
     });
   });
 

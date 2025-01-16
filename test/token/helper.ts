@@ -4,9 +4,6 @@ import { Contract } from "ethers";
 import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 import { expect } from "chai";
 import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
-
-import IUniswapV2Factory from '@uniswap/v2-core/build/IUniswapV2Factory.json';
-import IUniswapV2Router02 from '@uniswap/v2-periphery/build/IUniswapV2Router02.json';
 import WETH9 from '@uniswap/v2-periphery/build/WETH9.json';
 import UniswapV2Factory from '@uniswap/v2-core/build/UniswapV2Factory.json';
 import UniswapV2Router02 from '@uniswap/v2-periphery/build/UniswapV2Router02.json';
@@ -26,20 +23,27 @@ export interface TestContext {
 
 export async function createToken(
   context: TestContext,
-  creator: HardhatEthersSigner
+  creator: HardhatEthersSigner,
+  dexRouters?: Array<{ routerAddress: string, weight: number }>
 ): Promise<Contract> {
-  const { manager, assetToken } = context;
+  const { manager, assetToken, uniswapRouter } = context;
   
   const purchaseAmount = ethers.parseEther("1000");
   await assetToken.connect(creator).approve(await manager.getAddress(), purchaseAmount);
   
+  // Default to using uniswapRouter with 100% weight if no routers specified
+  const defaultDexRouters = [{
+    routerAddress: await uniswapRouter.getAddress(),
+    weight: 100
+  }];
+
   const tx = await manager.connect(creator).launch(
     "Test Agent",
     "TEST",
-    "Test prompt",
     "Test intention",
     "https://test.com",
-    purchaseAmount
+    purchaseAmount,
+    dexRouters || defaultDexRouters
   );
   
   const receipt = await tx.wait();
@@ -125,7 +129,6 @@ export async function deployFixture(): Promise<TestContext> {
     10_000,                 // asset rate
     50,                     // graduation threshold percent
     100,                    // 100% max transaction (no limit)
-    await uniswapRouter.getAddress()
   ]);
   await manager.waitForDeployment();
 
