@@ -117,9 +117,9 @@ contract Factory is
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
 
         require(taxVault_ != address(0), "Invalid tax vault");
-        require(buyTax_ <= 10000, "Buy tax exceeds 100%");
-        require(sellTax_ <= 10000, "Sell tax exceeds 100%");
-        require(launchTax_ <= 10000, "Launch tax exceeds 100%");
+        require(buyTax_ <= 10_000, "Buy tax exceeds 10%");
+        require(sellTax_ <= 10_000, "Sell tax exceeds 10%");
+        require(launchTax_ <= 100_000, "Launch tax exceeds 100%");
         
         taxVault = taxVault_;
         buyTax = buyTax_;
@@ -158,14 +158,6 @@ contract Factory is
         return pairs[agentToken_][assetToken_];
     }
 
-    /**
-     * @notice Returns the total number of trading pairs created
-     * @return Length of the pairList array
-     */
-    function allPairsLength() external view returns (uint256) {
-        return pairList.length;
-    }
-
     /*//////////////////////////////////////////////////////////////
                            ADMIN FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -195,9 +187,9 @@ contract Factory is
         address taxVault_
     ) external onlyRole(ADMIN_ROLE) {
         require(taxVault_ != address(0), "Invalid tax vault");
-        require(buyTax_ <= 10000, "Buy tax exceeds 100%");
-        require(sellTax_ <= 10000, "Sell tax exceeds 100%");
-        require(launchTax_ <= 10000, "Launch tax exceeds 100%");
+        require(buyTax_ <= 10_000, "Buy tax exceeds 100%");
+        require(sellTax_ <= 10_000, "Sell tax exceeds 100%");
+        require(launchTax_ <= 100_000, "Launch tax exceeds 100%");
 
         buyTax = buyTax_;
         sellTax = sellTax_;

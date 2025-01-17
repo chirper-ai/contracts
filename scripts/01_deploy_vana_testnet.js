@@ -8,13 +8,13 @@ async function main() {
 
   // Initial parameters
   const TAX_VAULT = deployer.address; // Set your tax vault address
-  const INITIAL_BUY_TAX = 100; // 1% in basis points
-  const INITIAL_SELL_TAX = 100; // 1% in basis points
-  const INITIAL_LAUNCH_TAX = 2500; // 25% in basis points
+  const INITIAL_BUY_TAX = 1_000; // 1% in basis points
+  const INITIAL_SELL_TAX = 1_000; // 1% in basis points
+  const INITIAL_LAUNCH_TAX = 25_000; // 25% in basis points
   const INITIAL_SUPPLY = 1_000_000; // 1M tokens
   const ASSET_RATE = 10_000; // Rate for asset requirements
-  const GRAD_THRESHOLD_PERCENT = 50; // 50% threshold for graduation
-  const MAX_TX_PERCENT = 100; // 100% max transaction size (no limit)
+  const GRAD_THRESHOLD_PERCENT = 50_000; // 50% threshold for graduation
+  const MAX_TX_PERCENT = 10_000; // 10% max transaction size (no limit)
 
   // Use VANA (native token) and DEX addresses on moksha testnet
   const UNISWAP_ROUTER_ADDRESS = "0x2e7bfff8185C5a32991D2b0d68d4d2EFAaAA8F7B"; // TODO: Replace with actual DEX router on moksha
@@ -35,7 +35,8 @@ async function main() {
   const Router = await ethers.getContractFactory("Router");
   const router = await upgrades.deployProxy(Router, [
     await factory.getAddress(),
-    ASSET_TOKEN_ADDRESS  // Using zero address for native token
+    ASSET_TOKEN_ADDRESS,
+    MAX_TX_PERCENT  // Using zero address for native token
   ]);
   await router.waitForDeployment();
   console.log("Router deployed to:", await router.getAddress());
@@ -47,8 +48,7 @@ async function main() {
     await router.getAddress(),
     INITIAL_SUPPLY,
     ASSET_RATE,
-    GRAD_THRESHOLD_PERCENT,
-    MAX_TX_PERCENT
+    GRAD_THRESHOLD_PERCENT
   ]);
   await manager.waitForDeployment();
   console.log("Manager deployed to:", await manager.getAddress());

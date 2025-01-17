@@ -78,6 +78,8 @@ contract Router is
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
 
         require(factory_ != address(0), "Invalid factory");
+        require(maxTxPercent_ > 0, "Invalid max tx percent");
+        require(maxTxPercent_ <= 100_000, "Max tx percent Exceeds 100%");
 
         factory = Factory(factory_);
         assetToken = assetToken_;
@@ -105,7 +107,7 @@ contract Router is
         require(amountIn_ > 0, "Invalid amount");
         
         // check max transaction percent by total supply
-        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 10000;
+        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 10_000;
 
         // check max transaction amount
         require(amountIn_ <= maxTxAmount, "Exceeds max transaction");
@@ -118,7 +120,7 @@ contract Router is
 
         // Calculate split fees using Factory's tax settings
         uint256 feePercent = factory.buyTax();
-        uint256 totalFee = (feePercent * amountIn_) / 10000;
+        uint256 totalFee = (feePercent * amountIn_) / 10_000;
         uint256 halfFee = totalFee / 2;
         uint256 finalAmount = amountIn_ - totalFee;
         
@@ -154,7 +156,7 @@ contract Router is
         require(to_ != address(0), "Invalid recipient");
         
         // check max transaction percent by total supply
-        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 10000;
+        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 10_000;
 
         // check max transaction amount
         require(amountIn_ <= maxTxAmount, "Exceeds max transaction");
@@ -171,7 +173,7 @@ contract Router is
 
         // Calculate split fees using Factory's tax settings
         uint256 fee = factory.sellTax();
-        uint256 totalFee = (fee * amountOut) / 10000;
+        uint256 totalFee = (fee * amountOut) / 10_000;
         uint256 halfFee = totalFee / 2;
         uint256 finalAmount = amountOut - totalFee;
         
@@ -242,8 +244,8 @@ contract Router is
      */
     function setMaxTxPercent(uint256 maxTxPercent_) external onlyRole(ADMIN_ROLE) {
         // Ensure max transaction is within acceptable bounds
-        require(maxTxPercent_ > 0, "Invalid amount");
-        require(maxTxPercent_ <= 10000, "Exceeds 100%");
+        require(maxTxPercent_ > 0, "Invalid percent");
+        require(maxTxPercent_ <= 100_000, "Exceeds 100%");
 
         maxTxPercent = maxTxPercent_;
     }
