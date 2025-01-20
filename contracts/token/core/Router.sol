@@ -106,12 +106,6 @@ contract Router is
         require(to_ != address(0), "Invalid recipient");
         require(amountIn_ > 0, "Invalid amount");
         
-        // check max transaction percent by total supply
-        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 100_000;
-
-        // check max transaction amount
-        require(amountIn_ <= maxTxAmount, "Exceeds max transaction");
-        
         // Check token hasn't graduated
         Token token = Token(tokenAddress_);
         require(!token.hasGraduated(), "Token graduated");
@@ -133,6 +127,12 @@ contract Router is
         IERC20(assetToken).safeTransferFrom(to_, tokenOwner, halfFee);
 
         uint256 amountOut = _getAmountsOut(tokenAddress_, assetToken, finalAmount);
+        
+        // check max transaction percent by total supply
+        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 100_000;
+
+        // check max transaction amount
+        require(amountOut <= maxTxAmount, "Exceeds max transaction");
 
         IBondingPair(pair).transferTo(to_, amountOut);
         IBondingPair(pair).swap(0, amountOut, finalAmount, 0);
