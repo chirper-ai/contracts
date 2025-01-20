@@ -12,7 +12,8 @@ async function main() {
   const INITIAL_SELL_TAX = 1_000; // 1% in basis points
   const INITIAL_LAUNCH_TAX = 25_000; // 25% in basis points
   const INITIAL_SUPPLY = 1_000_000; // 1M tokens
-  const ASSET_RATE = 10_000; // Rate for asset requirements
+  const K_CONSTANT = 3_420_000_000; // K constant for bonding curve
+  const ASSET_RATE = 60_000; // Rate for asset requirements
   const GRAD_THRESHOLD_PERCENT = 50_000; // 50% threshold for graduation
   const MAX_TX_PERCENT = 10_000; // 10% max transaction size (no limit)
 
@@ -47,6 +48,7 @@ async function main() {
     await factory.getAddress(),
     await router.getAddress(),
     INITIAL_SUPPLY,
+    K_CONSTANT,
     ASSET_RATE,
     GRAD_THRESHOLD_PERCENT
   ]);

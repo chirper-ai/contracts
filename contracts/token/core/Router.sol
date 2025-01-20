@@ -107,7 +107,7 @@ contract Router is
         require(amountIn_ > 0, "Invalid amount");
         
         // check max transaction percent by total supply
-        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 10_000;
+        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 100_000;
 
         // check max transaction amount
         require(amountIn_ <= maxTxAmount, "Exceeds max transaction");
@@ -120,7 +120,7 @@ contract Router is
 
         // Calculate split fees using Factory's tax settings
         uint256 feePercent = factory.buyTax();
-        uint256 totalFee = (feePercent * amountIn_) / 10_000;
+        uint256 totalFee = (feePercent * amountIn_) / 100_000;
         uint256 halfFee = totalFee / 2;
         uint256 finalAmount = amountIn_ - totalFee;
         
@@ -156,7 +156,7 @@ contract Router is
         require(to_ != address(0), "Invalid recipient");
         
         // check max transaction percent by total supply
-        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 10_000;
+        uint256 maxTxAmount = (IERC20(tokenAddress_).totalSupply() * maxTxPercent) / 100_000;
 
         // check max transaction amount
         require(amountIn_ <= maxTxAmount, "Exceeds max transaction");
@@ -173,7 +173,7 @@ contract Router is
 
         // Calculate split fees using Factory's tax settings
         uint256 fee = factory.sellTax();
-        uint256 totalFee = (fee * amountOut) / 10_000;
+        uint256 totalFee = (fee * amountOut) / 100_000;
         uint256 halfFee = totalFee / 2;
         uint256 finalAmount = amountOut - totalFee;
         

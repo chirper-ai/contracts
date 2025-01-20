@@ -28,13 +28,13 @@ export async function createToken(
 ): Promise<Contract> {
   const { manager, assetToken, uniswapRouter } = context;
   
-  const purchaseAmount = ethers.parseEther("1000");
+  const purchaseAmount = ethers.parseEther("30"); // $300 in VANA
   await assetToken.connect(creator).approve(await manager.getAddress(), purchaseAmount);
   
   // Default to using uniswapRouter with 100% weight if no routers specified
   const defaultDexRouters = [{
     routerAddress: await uniswapRouter.getAddress(),
-    weight: 10000
+    weight: 100_000
   }];
 
   const tx = await manager.connect(creator).launch(
@@ -96,9 +96,9 @@ export async function deployFixture(): Promise<TestContext> {
   const Factory = await ethers.getContractFactory("Factory");
   const factory = await upgrades.deployProxy(Factory, [
     await owner.getAddress(),  // tax vault
-    200,                       // 2% buy tax
-    300,                       // 3% sell tax
-    500                        // 5% launch tax
+    2_000,                     // 2% buy tax
+    3_000,                     // 3% sell tax
+    5_000                      // 5% launch tax
   ]);
   await factory.waitForDeployment();
 
@@ -107,7 +107,7 @@ export async function deployFixture(): Promise<TestContext> {
   const router = await upgrades.deployProxy(Router, [
     await factory.getAddress(),
     await assetToken.getAddress(),
-    10000, // 100% max transaction percent, no limit
+    10_000, // 10% max transaction percent, no limit
   ]);
   await router.waitForDeployment();
 
@@ -127,8 +127,9 @@ export async function deployFixture(): Promise<TestContext> {
     await factory.getAddress(),
     await router.getAddress(),
     1_000_000,              // initial supply
-    10_000,                 // asset rate
-    5000,                   // graduation threshold percent
+    3_420_000_000,          // k constant
+    60_000,                 // asset rate
+    50_000,                  // graduation threshold percent
   ]);
   await manager.waitForDeployment();
 

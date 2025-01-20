@@ -17,10 +17,10 @@ describe("Manager", function() {
       expect(await manager.factory()).to.equal(await factory.getAddress());
       expect(await manager.router()).to.equal(await router.getAddress());
       // Launch fee is now handled by factory
-      expect(Number(await factory.launchTax())).to.equal(500); // 5%
+      expect(Number(await factory.launchTax())).to.equal(5_000); // 5%
       expect(Number(await manager.initialSupply())).to.equal(1_000_000);
-      expect(Number(await manager.assetRate())).to.equal(10_000);
-      expect(Number(await manager.gradThresholdPercent())).to.equal(5000);
+      expect(Number(await manager.assetRate())).to.equal(60_000);
+      expect(Number(await manager.gradThresholdPercent())).to.equal(50_000);
     });
 
     it("should have correct owner", async function() {
@@ -126,7 +126,7 @@ describe("Manager", function() {
       const inputAmount = ethers.parseEther("100");
       // Account for buy tax (default is usually around 5%)
       const taxRate = await factory.buyTax();
-      const inputAfterTax = inputAmount - (inputAmount * BigInt(taxRate)) / 10000n;
+      const inputAfterTax = inputAmount - (inputAmount * BigInt(taxRate)) / 100000n;
       const expectedOutput = (reserveAgent * inputAfterTax) / (reserveAsset + inputAfterTax);
       
       // Execute the buy
@@ -185,19 +185,19 @@ describe("Manager", function() {
     async function graduateToken(context: TestContext) {
       const { manager, router, alice, bob, assetToken, uniswapRouter } = context;
       
-      await manager.setGradThresholdPercent(50);
+      await manager.setGradThresholdPercent(50_000);
       
       // Launch with DEX router
       const dexRouters = [{
         routerAddress: await uniswapRouter.getAddress(),
-        weight: 10000
+        weight: 100_000
       }];
       
       const agentToken = await createToken(context, alice, dexRouters);
       const tokenAddress = await agentToken.getAddress();
       
       // Buy enough to trigger graduation
-      const buyAmount = ethers.parseEther("1000000");
+      const buyAmount = ethers.parseEther("6000"); // 5_000 $VANA or $50,000
       await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
       
       const buyTx = await manager.connect(bob).buy(buyAmount, tokenAddress);
@@ -219,11 +219,11 @@ describe("Manager", function() {
     it("should graduate token when threshold reached", async function() {
       const { manager, router, alice, bob, assetToken } = context;
       
-      await manager.setGradThresholdPercent(50);
+      await manager.setGradThresholdPercent(50_000);
       const agentToken = await createToken(context, alice);
       const tokenAddress = await agentToken.getAddress();
       
-      const buyAmount = ethers.parseEther("1000000");
+      const buyAmount = ethers.parseEther("6000");
       await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
       
       const tx = await manager.connect(bob).buy(buyAmount, tokenAddress);
@@ -276,22 +276,34 @@ describe("Manager", function() {
 
     it("should distribute liquidity according to weights", async function() {
       const { agentToken, dexRouters, dexPools } = await graduateToken(context);
-
-      // Check liquidity distribution matches weights
-      for (let i = 0; i < dexPools.length; i++) {
-        const pair = await ethers.getContractAt("IUniswapV2Pair", dexPools[i]);
+      
+      // Calculate total TVL across all pools
+      let totalTVL = 0n;
+      const poolTVLs = [];
+      
+      for (const poolAddress of dexPools) {
+        const pair = await ethers.getContractAt("IUniswapV2Pair", poolAddress);
         const [reserve0, reserve1] = await pair.getReserves();
+        const tvl = reserve0 * reserve1;
+        poolTVLs.push(tvl);
+        totalTVL += tvl;
+      }
+      
+      // Verify each pool's TVL matches its weight within 5% tolerance
+      for (let i = 0; i < dexPools.length; i++) {
+        const actualRatio = (poolTVLs[i] * 100_000n) / totalTVL;
+        const expectedWeight = BigInt(dexRouters[i].weight);
         
-        // Calculate total value locked (TVL)
-        const tvl = BigInt(reserve0) * BigInt(reserve1);
+        // Allow 5% tolerance (5000 = 5%)
+        const tolerance = 5_000n;
+        const lowerBound = expectedWeight - tolerance;
+        const upperBound = expectedWeight + tolerance;
         
-        // Get the expected weight for this DEX
-        const weight = dexRouters[i].weight;
-        
-        // TODO: Compare TVL ratios to weights
-        // This would need precise calculations based on your specific tokenomics
-        // For now, just verify non-zero liquidity
-        expect(Number(tvl)).to.be.gt(0);
+        expect(Number(actualRatio)).to.be.within(
+          Number(lowerBound),
+          Number(upperBound),
+          `Pool ${i} liquidity ratio (${actualRatio}) does not match weight (${expectedWeight})`
+        );
       }
     });
   });

@@ -70,8 +70,8 @@ contract Token is ERC20, Ownable {
         address taxVault_
     ) ERC20(name_, symbol_) Ownable(msg.sender) {
         require(manager_ != address(0), "Invalid manager");
-        require(buyTax_ <= 1_000, "Buy tax too high");
-        require(sellTax_ <= 1_000, "Sell tax too high");
+        require(buyTax_ <= 10_000, "Buy tax too high");
+        require(sellTax_ <= 10_000, "Sell tax too high");
 
         manager = manager_;
         buyTax = buyTax_;
@@ -145,8 +145,8 @@ contract Token is ERC20, Ownable {
      * @param sellTax_ Sell tax percentage in basis points (1/100th of 1%)
      */
     function setTaxParameters(uint256 buyTax_, uint256 sellTax_) external onlyOwner {
-        require(buyTax_ <= 1_000, "Buy tax too high");
-        require(sellTax_ <= 1_000, "Sell tax too high");
+        require(buyTax_ <= 10_000, "Buy tax too high");
+        require(sellTax_ <= 10_000, "Sell tax too high");
         buyTax = buyTax_;
         sellTax = sellTax_;
     }
@@ -183,10 +183,10 @@ contract Token is ERC20, Ownable {
 
         if (isPool[from_]) {
             // Buy tax
-            return (amount_ * buyTax) / 10_000;
+            return (amount_ * buyTax) / 100_000;
         } else if (isPool[to_]) {
             // Sell tax
-            return (amount_ * sellTax) / 10_000;
+            return (amount_ * sellTax) / 100_000;
         }
         
         // No tax on wallet transfers

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "hardhat/console.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
@@ -35,7 +36,7 @@ contract Manager is
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Bonding curve constant used in price calculations
-    uint256 public constant K = 3_000_000_000;
+    uint256 public K;
 
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
@@ -162,6 +163,7 @@ contract Manager is
      * @param factory_ Address of the Factory contract
      * @param router_ Address of the Router contract
      * @param initSupply_ Initial token supply
+     * @param kConstant_ Bonding curve constant
      * @param assetRateValue_ Asset rate for calculations
      * @param gradThresholdPercent_ Graduation threshold percentage
      */
@@ -169,6 +171,7 @@ contract Manager is
         address factory_,
         address router_,
         uint256 initSupply_,
+        uint256 kConstant_,
         uint256 assetRateValue_,
         uint256 gradThresholdPercent_
     ) external initializer {
@@ -178,6 +181,7 @@ contract Manager is
         require(factory_ != address(0), "Invalid factory");
         require(router_ != address(0), "Invalid router");
 
+        K = kConstant_;
         factory = Factory(factory_);
         router = Router(router_);
         initialSupply = initSupply_;
@@ -189,17 +193,6 @@ contract Manager is
                          CORE TRADING FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /**
-     * @notice Creates and launches a new agent token
-     * @param name_ Base name for the token
-     * @param ticker_ Trading symbol
-     * @param intention_ Agent's purpose
-     * @param url_ Reference URL
-     * @param purchaseAmount_ Initial purchase amount
-     * @return token Token address
-     * @return pair Pair address
-     * @return index Token index in list
-     */
     function launch(
         string memory name_,
         string memory ticker_,
@@ -213,10 +206,10 @@ contract Manager is
         uint256 totalWeight;
         for(uint i = 0; i < dexRouters_.length; i++) {
             require(dexRouters_[i].routerAddress != address(0), "Invalid router address");
-            require(dexRouters_[i].weight > 0 && dexRouters_[i].weight <= 10_000, "Invalid weight");
+            require(dexRouters_[i].weight > 0 && dexRouters_[i].weight <= 100_000, "Invalid weight");
             totalWeight += dexRouters_[i].weight;
         }
-        require(totalWeight == 10_000, "Weights must sum to 10000");
+        require(totalWeight == 100_000, "Weights must sum to 100_000");
 
         address assetToken_ = router.assetToken();
         require(
@@ -224,7 +217,7 @@ contract Manager is
             "Insufficient funds"
         );
 
-        uint256 launchTax = (purchaseAmount_ * factory.launchTax()) / 10_000;
+        uint256 launchTax = (purchaseAmount_ * factory.launchTax()) / 100_000;
         uint256 initialPurchase = purchaseAmount_ - launchTax;
         
         // Transfer launch tax to tax vault
@@ -235,7 +228,7 @@ contract Manager is
             initialPurchase
         );
 
-        // Create token with factory reference
+        // Create token (decimal scaling handled by Token contract)
         Token actualToken = new Token(
             string.concat(name_, "agent"), 
             ticker_,
@@ -245,14 +238,14 @@ contract Manager is
             factory.sellTax(),
             factory.taxVault()
         );
-        uint256 supply = actualToken.totalSupply();
 
         address newBondingPair = factory.createPair(address(actualToken), assetToken_);
+        uint256 supply = actualToken.totalSupply();
 
         require(_approve(address(router), address(actualToken), supply));
 
-        uint256 k = ((K * 10_000) / assetRate);
-        uint256 liquidity = (((k * 10_000 ether) / supply) * 1 ether) / 10_000;
+        uint256 k = ((K * 100_000) / assetRate);
+        uint256 liquidity = (((k * 100_000 ether) / supply) * 1 ether) / 100_000;
 
         router.addInitialLiquidity(address(actualToken), supply, liquidity);
 
@@ -294,7 +287,15 @@ contract Manager is
 
         IERC20(assetToken_).forceApprove(address(router), initialPurchase);
         router.buy(initialPurchase, address(actualToken), address(this));
-        actualToken.transfer(msg.sender, actualToken.balanceOf(address(this)));
+        
+        // Check received tokens don't exceed 20% of supply
+        uint256 receivedTokens = actualToken.balanceOf(address(this));
+        require(
+            receivedTokens <= (supply * 20_000) / 100_000,
+            "Initial purchase exceeds 20% of supply"
+        );
+        
+        actualToken.transfer(msg.sender, receivedTokens);
 
         return (address(actualToken), newBondingPair, tokenIndex);
     }
@@ -338,7 +339,7 @@ contract Manager is
         uint256 totalSupply = IERC20(tokenAddress_).totalSupply();
         require(totalSupply > 0, "Invalid total supply");
 
-        uint256 reservePercentage = (newReserveA * 10_000) / totalSupply;
+        uint256 reservePercentage = (newReserveA * 100_000) / totalSupply;
         
         if (reservePercentage <= gradThresholdPercent) {
             _graduate(tokenAddress_);
@@ -501,8 +502,8 @@ contract Manager is
         address[] memory newPairs = new address[](dexRouters_.length);
 
         for (uint i = 0; i < dexRouters_.length; i++) {
-            uint256 tokenAmount = (totalTokens_ * dexRouters_[i].weight) / 10_000;
-            uint256 assetAmount = (totalAssets_ * dexRouters_[i].weight) / 10_000;
+            uint256 tokenAmount = (totalTokens_ * dexRouters_[i].weight) / 100_000;
+            uint256 assetAmount = (totalAssets_ * dexRouters_[i].weight) / 100_000;
 
             IUniswapV2Router02 dexRouter = IUniswapV2Router02(dexRouters_[i].routerAddress);
 
