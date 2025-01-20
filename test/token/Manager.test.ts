@@ -77,14 +77,17 @@ describe("Manager", function() {
       
       const agentToken = await createToken(context, alice);
       
+      // before metrics
+      const beforeMetrics = await manager.agentTokens(await agentToken.getAddress());
+      
       // Execute a buy
       const buyAmount = ethers.parseEther("100");
       await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
       await manager.connect(bob).buy(buyAmount, await agentToken.getAddress());
       
       const metrics = await manager.agentTokens(await agentToken.getAddress());
-      expect(Number(metrics.metrics.vol)).to.be.gt(Number(0));
-      expect(Number(metrics.metrics.vol24h)).to.be.gt(Number(0));
+      expect(Number(metrics.metrics.price)).to.be.gt(Number(beforeMetrics.metrics.price));
+      expect(Number(metrics.metrics.marketCap)).to.be.gt(Number(beforeMetrics.metrics.marketCap));
     });
 
     it("should maintain constant product K after buys", async function() {

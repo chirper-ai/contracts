@@ -18,8 +18,8 @@ describe("Token", function() {
       "TEST",
       "1000000", // 1M tokens
       await context.owner.getAddress(), // owner as manager
-      100,
-      100,
+      1_000,
+      1_000,
       await context.owner.getAddress()
     );
     await token.waitForDeployment();

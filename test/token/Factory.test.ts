@@ -16,9 +16,9 @@ describe("Factory", function() {
       const { factory, owner } = context;
       
       expect(await factory.taxVault()).to.equal(await owner.getAddress());
-      expect(Number(await factory.buyTax())).to.equal(200);
-      expect(Number(await factory.sellTax())).to.equal(300);
-      expect(Number(await factory.launchTax())).to.equal(500);
+      expect(Number(await factory.buyTax())).to.equal(2_000);
+      expect(Number(await factory.sellTax())).to.equal(3_000);
+      expect(Number(await factory.launchTax())).to.equal(5_000);
     });
 
     it("should grant DEFAULT_ADMIN_ROLE to deployer", async function() {
@@ -40,8 +40,8 @@ describe("Factory", function() {
         "TEST",
         "1000000",
         await alice.getAddress(),  // manager address
-        100,
-        100,
+        1_000,
+        1_000,
         alice.getAddress()
       );
       await agentToken.waitForDeployment();

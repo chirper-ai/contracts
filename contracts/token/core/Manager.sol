@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "hardhat/console.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
@@ -69,32 +68,30 @@ contract Manager is
 
     /**
      * @notice Comprehensive metrics tracking for an agent token
-     * @param token Address of the token contract
-     * @param name Full name of the token including "agent" suffix
-     * @param baseName Original name without suffix
-     * @param ticker Trading symbol for the token
-     * @param supply Total token supply
-     * @param price Current token price
-     * @param mktCap Market capitalization
-     * @param liq Total liquidity
-     * @param vol Lifetime trading volume
-     * @param vol24h Rolling 24-hour trading volume
-     * @param lastPrice Price at last update
-     * @param lastUpdate Timestamp of last metrics update
+     * @param tokenAddr Address of the token contract
+     * @param name Full token name
+     * @param baseName Token name without "agent" suffix
+     * @param ticker Trading symbol
+     * @param totalSupply Total token supply
+     * @param circulatingSupply Tokens in circulation (not in bonding pair)
+     * @param price Current price in VANA (1e18 decimals)
+     * @param marketCap Market cap (circulating * price)
+     * @param fdv Fully diluted value (totalSupply * price)
+     * @param tvl Total value locked in bonding pair
+     * @param lastUpdate Last update timestamp
      */
     struct TokenMetrics {
-        address token;
-        string name;
-        string baseName;
-        string ticker;
-        uint256 supply;
-        uint256 price;
-        uint256 mktCap;
-        uint256 liq;
-        uint256 vol;
-        uint256 vol24h;
-        uint256 lastPrice;
-        uint256 lastUpdate;
+        address tokenAddr;           // Token contract address
+        string name;                // Full token name
+        string baseName;           // Name without "agent" suffix
+        string ticker;             // Trading symbol
+        uint256 totalSupply;       // Total token supply
+        uint256 circulatingSupply; // Tokens in circulation (not in bonding pair)
+        uint256 price;             // Current price in VANA (1e18 decimals)
+        uint256 marketCap;         // Market cap (circulating * price)
+        uint256 fdv;               // Fully diluted value (totalSupply * price)
+        uint256 tvl;               // Total value locked in bonding pair
+        uint256 lastUpdate;        // Last update timestamp
     }
 
     /**
@@ -145,6 +142,17 @@ contract Manager is
     /// @notice Emitted when an agent token graduates to Uniswap
     event Graduated(address indexed token);
 
+    /// @notice Emitted when token metrics are updated
+    event MetricsUpdated(
+        address indexed token,
+        uint256 totalSupply,
+        uint256 circulatingSupply,
+        uint256 price,
+        uint256 marketCap,
+        uint256 liquidity,
+        uint256 volume24h
+    );
+
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -193,6 +201,26 @@ contract Manager is
                          CORE TRADING FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
+    /**
+     * @notice Creates and initializes a new AI agent token with bonding curve trading
+     * @dev This is the core function for launching new agent tokens. It:
+     * 1. Validates inputs and collects launch tax
+     * 2. Creates new Token contract
+     * 3. Creates bonding pair via Factory
+     * 4. Sets up initial liquidity with bonding curve parameters
+     * 5. Makes initial token purchase for launcher
+     * 6. Updates and validates metrics
+     *
+     * @param name_ Full name of the token
+     * @param ticker_ Trading symbol for the token
+     * @param intention_ Purpose/mission of the token
+     * @param url_ Reference URL for the token
+     * @param purchaseAmount_ Amount of asset tokens (VANA) to spend on launch
+     * @param dexRouters_ Array of DEX routers and weights for future graduation
+     * @return token Address of the newly created token
+     * @return pair Address of the bonding pair
+     * @return index Index in the agentTokenList
+     */
     function launch(
         string memory name_,
         string memory ticker_,
@@ -201,8 +229,8 @@ contract Manager is
         uint256 purchaseAmount_,
         DexRouter[] memory dexRouters_
     ) external nonReentrant returns (address token, address pair, uint256 index) {
+        // Validate DEX router configuration
         require(dexRouters_.length > 0, "Must provide at least one DEX router");
-        
         uint256 totalWeight;
         for(uint i = 0; i < dexRouters_.length; i++) {
             require(dexRouters_[i].routerAddress != address(0), "Invalid router address");
@@ -211,6 +239,7 @@ contract Manager is
         }
         require(totalWeight == 100_000, "Weights must sum to 100_000");
 
+        // Check asset token balance and collect launch tax
         address assetToken_ = router.assetToken();
         require(
             IERC20(assetToken_).balanceOf(msg.sender) >= purchaseAmount_,
@@ -228,7 +257,7 @@ contract Manager is
             initialPurchase
         );
 
-        // Create token (decimal scaling handled by Token contract)
+        // Create token contract
         Token actualToken = new Token(
             string.concat(name_, "agent"), 
             ticker_,
@@ -239,31 +268,38 @@ contract Manager is
             factory.taxVault()
         );
 
+        // Create bonding pair
         address newBondingPair = factory.createPair(address(actualToken), assetToken_);
-        uint256 supply = actualToken.totalSupply();
+        uint256 totalSupply = actualToken.totalSupply();
 
-        require(_approve(address(router), address(actualToken), supply));
+        require(_approve(address(router), address(actualToken), totalSupply));
 
-        uint256 k = ((K * 100_000) / assetRate);
-        uint256 liquidity = (((k * 100_000 ether) / supply) * 1 ether) / 100_000;
+        // Calculate initial liquidity
+        uint256 k = K * 1 ether;  // Scale k to 18 decimals
+        uint256 initialLiquidity = (k * 1 ether) / totalSupply;  // Calculate initial VANA liquidity
 
-        router.addInitialLiquidity(address(actualToken), supply, liquidity);
+        // Add initial liquidity to bonding pair
+        router.addInitialLiquidity(address(actualToken), totalSupply, initialLiquidity);
 
+        // Get initial price using router's getAmountsOut
+        uint256 initialPrice = router.getAmountsOut(address(actualToken), address(0), 1e18);
+
+        // Initialize token metrics
         TokenMetrics memory metrics = TokenMetrics({
-            token: address(actualToken),
+            tokenAddr: address(actualToken),
             name: string.concat(name_, "agent"),
             baseName: name_,
             ticker: ticker_,
-            supply: supply,
-            price: supply / liquidity,
-            mktCap: liquidity,
-            liq: liquidity * 2,
-            vol: 0,
-            vol24h: 0,
-            lastPrice: supply / liquidity,
+            totalSupply: totalSupply,
+            circulatingSupply: 0,  // Initially 0 as all tokens in bonding pair
+            price: initialPrice,
+            marketCap: 0,  // Initially 0 as no circulating supply
+            fdv: (totalSupply * initialPrice) / 1e18,
+            tvl: initialPurchase * 2,  // Double the VANA liquidity
             lastUpdate: block.timestamp
         });
 
+        // Store token data
         TokenData memory localToken = TokenData({
             creator: msg.sender,
             token: address(actualToken),
@@ -280,22 +316,29 @@ contract Manager is
 
         agentTokens[address(actualToken)] = localToken;
         agentTokenList.push(address(actualToken));
-
         uint256 tokenIndex = agentTokenList.length;
 
         emit Launched(address(actualToken), newBondingPair, tokenIndex);
 
+        // Execute initial token purchase
         IERC20(assetToken_).forceApprove(address(router), initialPurchase);
         router.buy(initialPurchase, address(actualToken), address(this));
         
-        // Check received tokens don't exceed 20% of supply
+        // Validate received tokens
         uint256 receivedTokens = actualToken.balanceOf(address(this));
+        
+        // Ensure initial purchase doesn't exceed 20% of supply
         require(
-            receivedTokens <= (supply * 20_000) / 100_000,
+            receivedTokens <= (totalSupply * 20_000) / 100_000,
             "Initial purchase exceeds 20% of supply"
         );
         
+        // Transfer tokens to launcher
         actualToken.transfer(msg.sender, receivedTokens);
+
+        // Update metrics after initial purchase
+        (uint256 reserveToken, uint256 reserveAsset) = IBondingPair(newBondingPair).getReserves();
+        _updateMetrics(address(actualToken), reserveToken, reserveAsset, initialPurchase);
 
         return (address(actualToken), newBondingPair, tokenIndex);
     }
@@ -389,41 +432,80 @@ contract Manager is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Updates token metrics after a trade
+     * @notice Calculates the circulating supply of a token
      * @param tokenAddress_ Address of the token
-     * @param newReserveA_ New reserve of token A
-     * @param newReserveB_ New reserve of token B
-     * @param amount_ Amount involved in trade
+     * @param totalSupply_ Total supply of the token
+     */
+    function calculateCirculatingSupply(
+        address tokenAddress_,
+        uint256 totalSupply_
+    ) internal view returns (uint256) {
+        Token token = Token(tokenAddress_);
+        TokenData storage tokenData = agentTokens[tokenAddress_];
+        
+        // Get locked/non-circulating balances
+        uint256 bondingReserves = token.balanceOf(tokenData.bondingPair);
+        uint256 deadBalance = token.balanceOf(address(0));  // Burned tokens
+        
+        return totalSupply_ - bondingReserves - deadBalance;
+    }
+
+    /**
+     * @notice Updates token metrics after a trade or during launch
+     * @dev Uses router's getAmountsOut for accurate price calculation
+     * @param tokenAddress_ Address of the token being updated
+     * @param newReserveToken_ Current token balance in bonding pair
+     * @param newReserveAsset_ Current VANA balance in bonding pair
+     * @param amount_ Amount involved in transaction (not used for metrics)
      */
     function _updateMetrics(
         address tokenAddress_,
-        uint256 newReserveA_,
-        uint256 newReserveB_,
+        uint256 newReserveToken_,
+        uint256 newReserveAsset_,
         uint256 amount_
     ) private {
         TokenData storage token = agentTokens[tokenAddress_];
-        uint256 duration = block.timestamp - token.metrics.lastUpdate;
         
-        uint256 liquidity = newReserveB_ * 2;
-        uint256 marketCap = (token.metrics.supply * newReserveB_) / newReserveA_;
-        uint256 price = newReserveA_ / newReserveB_;
-        uint256 volume = duration > 86400
-            ? amount_
-            : token.metrics.vol24h + amount_;
-        uint256 lastPrice = duration > 86400
-            ? token.metrics.price
-            : token.metrics.lastPrice;
-
-        token.metrics.price = price;
-        token.metrics.mktCap = marketCap;
-        token.metrics.liq = liquidity;
-        token.metrics.vol = token.metrics.vol + amount_;
-        token.metrics.vol24h = volume;
-        token.metrics.lastPrice = lastPrice;
-
-        if (duration > 86400) {
-            token.metrics.lastUpdate = block.timestamp;
+        // Get total supply from token contract
+        uint256 totalSupply = Token(tokenAddress_).totalSupply();
+        require(totalSupply > 0, "Invalid total supply");
+        
+        // Calculate circulating supply (total - bonding pair balance)
+        uint256 circulatingSupply = calculateCirculatingSupply(tokenAddress_, totalSupply);
+        
+        // Calculate price using router's getAmountsOut
+        // Get price for 1 token (1e18 units) to maintain precision
+        uint256 price;
+        if (newReserveToken_ > 0) {
+            price = router.getAmountsOut(tokenAddress_, address(0), 1e18);
+        } else {
+            price = 0;
         }
+        
+        // Calculate market metrics using price with 1e18 precision
+        uint256 marketCap = (circulatingSupply * price) / 1e18;
+        uint256 fdv = (totalSupply * price) / 1e18;
+        uint256 tvl = IERC20(router.assetToken()).balanceOf(token.bondingPair) * 2;
+        
+        // Update metrics
+        token.metrics.tokenAddr = tokenAddress_;
+        token.metrics.totalSupply = totalSupply;
+        token.metrics.circulatingSupply = circulatingSupply;
+        token.metrics.price = price;
+        token.metrics.marketCap = marketCap;
+        token.metrics.fdv = fdv;
+        token.metrics.tvl = tvl;
+        token.metrics.lastUpdate = block.timestamp;
+        
+        emit MetricsUpdated(
+            tokenAddress_,
+            totalSupply,
+            circulatingSupply,
+            price,
+            marketCap,
+            fdv,
+            tvl
+        );
     }
 
     /**
