@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// import console
-import "hardhat/console.sol";
-
+// openzeppelin
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -23,6 +21,11 @@ import "../interfaces/UniswapV3/IUniswapV3Pool.sol";
 import "../interfaces/UniswapV3/IUniswapV3Factory.sol";
 import "../interfaces/UniswapV3/INonfungiblePositionManager.sol";
 
+// velodrome simplified
+import "../interfaces/Velodrome/IVelodromeRouter.sol";
+import "../interfaces/Velodrome/IVelodromeFactory.sol";
+
+// locals
 import "./Factory.sol";
 import "./Router.sol";
 import "./Token.sol";
@@ -49,7 +52,8 @@ contract Manager is
     /// @notice Enum to specify the type of DEX router
     enum RouterType {
         UniswapV2,
-        UniswapV3
+        UniswapV3,
+        Velodrome
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -613,13 +617,20 @@ contract Manager is
                     tokenAmount,
                     assetAmount
                 );
-            } else {
+            } else if (dexRouters_[i].routerType == RouterType.UniswapV3) {
                 newPairs[i] = _deployToUniswapV3(
                     tokenAddress_,
                     dexRouters_[i].routerAddress,
                     tokenAmount,
                     assetAmount,
                     dexRouters_[i].feeAmount
+                );
+            } else if (dexRouters_[i].routerType == RouterType.Velodrome) {
+                newPairs[i] = _deployToVelodrome(
+                    tokenAddress_,
+                    dexRouters_[i].routerAddress,
+                    tokenAmount,
+                    assetAmount
                 );
             }
         }
@@ -775,6 +786,74 @@ contract Manager is
             recipient: address(this),
             deadline: block.timestamp + 3600
         }));
+
+        return dexPool;
+    }
+
+    /**
+     * @notice Deploys liquidity to a Velodrome pool
+     * @dev Velodrome is similar to Uniswap V2 but with stable/volatile pool options
+     * We default to volatile pools for AI tokens
+     * @param tokenAddress_ Address of the token
+     * @param routerAddress_ Address of the Velodrome router
+     * @param tokenAmount_ Amount of tokens to provide as liquidity
+     * @param assetAmount_ Amount of asset tokens to provide as liquidity
+     * @return dexPool Address of the created or existing Velodrome pool
+     */
+    function _deployToVelodrome(
+        address tokenAddress_,
+        address routerAddress_,
+        uint256 tokenAmount_,
+        uint256 assetAmount_
+    ) private returns (address dexPool) {
+        address assetTokenAddr = router.assetToken();
+        IVelodromeRouter veloRouter = IVelodromeRouter(routerAddress_);
+        
+        // Approve Velodrome router to spend tokens
+        IERC20(tokenAddress_).forceApprove(address(veloRouter), tokenAmount_);
+        IERC20(assetTokenAddr).forceApprove(address(veloRouter), assetAmount_);
+
+        // Get factory and check for existing pair
+        address veloFactory = veloRouter.factory();
+        bool isStable = false; // We use volatile pools for AI tokens
+        
+        dexPool = IVelodromeFactory(veloFactory).getPair(
+            tokenAddress_,
+            assetTokenAddr,
+            isStable
+        );
+
+        // Create pair if it doesn't exist
+        if (dexPool == address(0)) {
+            dexPool = IVelodromeFactory(veloFactory).createPair(
+                tokenAddress_,
+                assetTokenAddr,
+                isStable
+            );
+        }
+
+        require(dexPool != address(0), "Failed to get/create Velodrome pair");
+
+        // Add liquidity to the pool
+        (uint256 amountToken, uint256 amountAsset, uint256 liquidity) = 
+            veloRouter.addLiquidity(
+                tokenAddress_,
+                assetTokenAddr,
+                isStable,
+                tokenAmount_,
+                assetAmount_,
+                tokenAmount_ * 95 / 100,  // 5% slippage tolerance
+                assetAmount_ * 95 / 100,
+                address(0),
+                block.timestamp + 3600
+            );
+
+        require(
+            amountToken >= tokenAmount_ * 95 / 100 &&
+            amountAsset >= assetAmount_ * 95 / 100 &&
+            liquidity > 0,
+            "Velodrome liquidity addition failed requirements"
+        );
 
         return dexPool;
     }

@@ -34,8 +34,9 @@ import SwapRouter from '@uniswap/v3-periphery/artifacts/contracts/SwapRouter.sol
  * Used to differentiate between Uniswap V2 and V3 integrations
  */
 export enum RouterType {
-  UniswapV2,  // Standard Uniswap V2 router
-  UniswapV3   // Advanced Uniswap V3 router with concentrated liquidity
+  UniswapV2,   // Standard Uniswap V2 router
+  UniswapV3,   // Advanced Uniswap V3 router with concentrated liquidity
+  Velodrome    // Velodrome V2 router with stable/volatile pools
 }
 
 /**
@@ -66,6 +67,10 @@ export interface TestContext {
   uniswapV3Router: Contract;       // Uniswap V3 Router contract
   uniswapV3Factory: Contract;      // Uniswap V3 Factory contract
   nftPositionManager: Contract;    // V3 NFT Position Manager for LP positions
+
+  // Velodrome Contracts
+  velodromeRouter: Contract;
+  velodromeFactory: Contract;
 }
 
 /**
