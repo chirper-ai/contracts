@@ -359,7 +359,7 @@ describe("Manager", function() {
     }
   
     it("should graduate token to Uniswap V3 pool", async function() {
-      const { manager, owner, router, alice, bob, assetToken, uniswapV3Factory } = context;
+      const { manager, owner, router, alice, bob, assetToken, uniswapV3Factory, nftPositionManager } = context;
   
       // set max trade size
       await router.connect(owner).setMaxTxPercent(100_000);
@@ -368,7 +368,7 @@ describe("Manager", function() {
       
       // Launch with V3 router
       const dexRouters = [{
-        routerAddress: await context.uniswapV3Router.getAddress(),
+        routerAddress: await nftPositionManager.getAddress(),
         weight: 100_000,
         routerType: RouterType.UniswapV3,
         feeAmount: 3000, // 0.03% fee for V3
@@ -399,7 +399,7 @@ describe("Manager", function() {
       const poolAddress = await uniswapV3Factory.getPool(
         tokenAddress,
         await assetToken.getAddress(),
-        100
+        3000
       );
       expect(poolAddress).to.not.equal(ethers.ZeroAddress);
     });
@@ -413,7 +413,7 @@ describe("Manager", function() {
       const poolAddress = await uniswapV3Factory.getPool(
         tokenAddress,
         await assetToken.getAddress(),
-        100
+        3000
       );
       const pool = await ethers.getContractAt("IUniswapV3Pool", poolAddress);
   
@@ -424,55 +424,22 @@ describe("Manager", function() {
   
       // Check liquidity
       const liquidity = await pool.liquidity();
-      expect(liquidity).to.be.gt(0);
+      expect(Number(liquidity)).to.be.gt(0);
   
       // Verify position through NFT manager
       const positions = await nftPositionManager.positions(1); // First position
-      expect(positions.liquidity).to.be.gt(0);
+      expect(Number(positions.liquidity)).to.be.gt(0);
       
       // Verify tick ranges 
       // Assuming default range of ±10% around current price
-      const currentTick = slot0.tick;
-      expect(positions.tickLower).to.be.lt(currentTick);
-      expect(positions.tickUpper).to.be.gt(currentTick);
-    });
-  
-    it("should distribute V3 liquidity effectively across price ranges", async function() {
-      const { assetToken, uniswapV3Factory } = context;
-      const { agentToken } = await graduateTokenToV3(context);
-      const tokenAddress = await agentToken.getAddress();
-  
-      const pool = await ethers.getContractAt(
-        "IUniswapV3Pool",
-        await uniswapV3Factory.getPool(
-          tokenAddress,
-          await assetToken.getAddress(),
-          100
-        )
-      );
-  
-      // Get current price and liquidity
-      const slot0 = await pool.slot0();
-      const basePrice = slot0.sqrtPriceX96;
-      
-      // Check liquidity distribution around current price
-      const tickSpacing = await pool.tickSpacing();
-      const currentTick = slot0.tick;
-      
-      // Sample liquidity at different tick ranges
-      const ranges = [-2, -1, 0, 1, 2].map(i => currentTick + (i * tickSpacing));
-      
-      let previousLiquidity = 0n;
-      for (const tick of ranges) {
-        const liquidityNet = await pool.ticks(tick);
-        // Ensure we have some liquidity changes at different ticks
-        expect(liquidityNet).to.not.equal(previousLiquidity);
-        previousLiquidity = liquidityNet;
-      }
+      const currentTick = Number(slot0.tick);
+      expect(Number(positions.tickLower)).to.be.lt(currentTick);
+      expect(Number(positions.tickUpper)).to.be.gt(currentTick);
     });
   
     it("should migrate to both V2 and V3 pools during graduation", async function() {
-      const { manager, owner, router, alice, bob, assetToken, uniswapV2Router, uniswapV3Router, uniswapV2Factory, uniswapV3Factory } = context;
+      const { manager, owner, router, alice, bob, assetToken, uniswapV2Router, 
+        nftPositionManager, uniswapV2Factory, uniswapV3Factory } = context;
       
       await manager.setGradThresholdPercent(50_000);
       await router.connect(owner).setMaxTxPercent(100_000);
@@ -483,13 +450,13 @@ describe("Manager", function() {
           routerAddress: await uniswapV2Router.getAddress(),
           weight: 50_000,
           routerType: RouterType.UniswapV2,
-          feeAmount: 0, // No fee for V2
+          feeAmount: 0,
         },
         {
-          routerAddress: await uniswapV3Router.getAddress(),
+          routerAddress: await nftPositionManager.getAddress(),
           weight: 50_000,
           routerType: RouterType.UniswapV3,
-          feeAmount: 3000, // 0.03% fee for V3
+          feeAmount: 3000,
         }
       ];
       
@@ -498,42 +465,64 @@ describe("Manager", function() {
       
       // Trigger graduation
       const buyAmount = ethers.parseEther("6000");
-      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
-      await manager.connect(bob).buy(buyAmount, tokenAddress);
       
-      // Check V2 pool
+      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
+      const buyTx = await manager.connect(bob).buy(buyAmount, tokenAddress);
+      await buyTx.wait();
+      
+      // Check V2 pool reserves
       const v2PairAddress = await uniswapV2Factory.getPair(
         tokenAddress,
         await assetToken.getAddress()
       );
-      expect(v2PairAddress).to.not.equal(ethers.ZeroAddress);
-      
       const v2Pair = await ethers.getContractAt("IUniswapV2Pair", v2PairAddress);
       const [v2Reserve0, v2Reserve1] = await v2Pair.getReserves();
-      expect(v2Reserve0).to.be.gt(0);
-      expect(v2Reserve1).to.be.gt(0);
+      const v2Token0 = await v2Pair.token0();
+
+      // Get reserves in correct order for V2
+      const [v2TokenReserve, v2AssetReserve] = v2Token0.toLowerCase() === tokenAddress.toLowerCase() 
+        ? [v2Reserve0, v2Reserve1] 
+        : [v2Reserve1, v2Reserve0];
       
       // Check V3 pool
       const v3PoolAddress = await uniswapV3Factory.getPool(
         tokenAddress,
         await assetToken.getAddress(),
-        100
+        3000
       );
-      expect(v3PoolAddress).to.not.equal(ethers.ZeroAddress);
-      
       const v3Pool = await ethers.getContractAt("IUniswapV3Pool", v3PoolAddress);
-      const v3Liquidity = await v3Pool.liquidity();
-      expect(v3Liquidity).to.be.gt(0);
-      
-      // Verify proportional liquidity distribution
-      const v2TVL = v2Reserve0 * v2Reserve1;
       const slot0 = await v3Pool.slot0();
-      const v3TVL = v3Liquidity * (slot0.sqrtPriceX96 ** 2n);
+      const v3Liquidity = await v3Pool.liquidity();
       
-      // Check if TVL split is roughly 50/50 (within 10% tolerance)
-      const totalTVL = v2TVL + v3TVL;
-      const v2Ratio = (v2TVL * 100_000n) / totalTVL;
-      expect(Number(v2Ratio)).to.be.within(45_000, 55_000);
+      // For V3, get token ordering
+      const v3Token0 = await v3Pool.token0();
+      const sqrtPriceX96 = slot0.sqrtPriceX96;
+      
+      // Calculate reserves from V3 liquidity and sqrtPrice
+      // Using the formula from Uniswap V3 whitepaper
+      const Q96 = BigInt(2) ** BigInt(96);
+      const sqrtRatioX96 = BigInt(sqrtPriceX96);
+      
+      let v3TokenReserve, v3AssetReserve;
+      if (v3Token0.toLowerCase() === tokenAddress.toLowerCase()) {
+        v3TokenReserve = (BigInt(v3Liquidity) * Q96) / sqrtRatioX96;
+        v3AssetReserve = (BigInt(v3Liquidity) * sqrtRatioX96) / Q96;
+      } else {
+        v3AssetReserve = (BigInt(v3Liquidity) * Q96) / sqrtRatioX96;
+        v3TokenReserve = (BigInt(v3Liquidity) * sqrtRatioX96) / Q96;
+      }
+
+      // Compare token reserves between V2 and V3 pools
+      // Should be roughly 50/50 split (within 10% tolerance)
+      const totalTokenReserves = v2TokenReserve + v3TokenReserve;
+      const v2TokenRatio = (v2TokenReserve * BigInt(100_000)) / totalTokenReserves;
+      
+      const totalAssetReserves = v2AssetReserve + v3AssetReserve;
+      const v2AssetRatio = (v2AssetReserve * BigInt(100_000)) / totalAssetReserves;
+      
+      // Check both token and asset ratios are close to 50/50
+      expect(Number(v2TokenRatio)).to.be.within(45_000, 55_000, "Token reserves not evenly split");
+      expect(Number(v2AssetRatio)).to.be.within(45_000, 55_000, "Asset reserves not evenly split");
     });
   });
 

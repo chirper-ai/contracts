@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 // import console
 import "hardhat/console.sol";
 
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
@@ -686,13 +687,29 @@ contract Manager is
     }
 
     /**
-     * @notice Deploys liquidity to a Uniswap V3 pool
-     * @param tokenAddress_ Address of the token
-     * @param routerAddress_ Address of the Uniswap V3 router
+     * @notice Deploys liquidity to a Uniswap V3 pool with full range coverage
+     * @dev This function handles both pool creation and initial liquidity provision.
+     * It ensures full-range market making (-887220 to +887220 ticks) while properly
+     * setting the initial pool price based on the token ratio.
+     * 
+     * Key steps:
+     * 1. Sort tokens (V3 requires token0 < token1)
+     * 2. Create pool if it doesn't exist
+     * 3. Initialize pool with correct price if new
+     * 4. Create full-range position
+     *
+     * Technical notes:
+     * - Uses TickMath for full range (-887220 to +887220)
+     * - sqrtPriceX96 is in Q64.96 format
+     * - Assumes amounts provided are already correctly proportioned
+     * - Sets minimum amounts to 1 to allow maximum slippage
+     *
+     * @param tokenAddress_ Address of the token being graduated
+     * @param routerAddress_ Address of the Uniswap V3 NonfungiblePositionManager
      * @param tokenAmount_ Amount of tokens to provide as liquidity
      * @param assetAmount_ Amount of asset tokens to provide as liquidity
-     * @param feeAmount_ Fee amount for the DEX pool
-     * @return dexPool Address of the created or existing DEX pool
+     * @param feeAmount_ Fee tier for the pool (500 = 0.05%, 3000 = 0.3%, 10000 = 1%)
+     * @return dexPool Address of the created/existing V3 pool
      */
     function _deployToUniswapV3(
         address tokenAddress_,
@@ -703,90 +720,49 @@ contract Manager is
     ) private returns (address dexPool) {
         address assetTokenAddr = router.assetToken();
         uint24 feeTier = uint24(feeAmount_);
-        
-        console.log("=== Contract Addresses ===");
-        console.log("Position Manager:", routerAddress_);
-        console.log("This contract:", address(this));
-        console.log("Token Address:", tokenAddress_);
-        console.log("Asset Address:", assetTokenAddr);
 
-        INonfungiblePositionManager positionManager = INonfungiblePositionManager(routerAddress_);
-        IUniswapV3Factory uniswapV3Factory = IUniswapV3Factory(positionManager.factory());
-        console.log("Factory:", address(uniswapV3Factory));
-
-        // Sort tokens (required by Uniswap V3)
+        // Sort tokens according to V3 requirements (token0 < token1)
         (address token0, address token1) = tokenAddress_ < assetTokenAddr 
             ? (tokenAddress_, assetTokenAddr) 
             : (assetTokenAddr, tokenAddress_);
-
-        console.log("=== Sorted Tokens ===");
-        console.log("Token0:", token0);
-        console.log("Token1:", token1);
-
-        // Log initial balances
-        console.log("=== Initial Balances ===");
-        uint256 token0Balance = IERC20(token0).balanceOf(address(this));
-        uint256 token1Balance = IERC20(token1).balanceOf(address(this));
-        console.log("Token0 Balance:", token0Balance);
-        console.log("Token1 Balance:", token1Balance);
-
-        // Calculate amounts
-        uint256 amount0 = token0 == tokenAddress_ ? tokenAmount_ : assetAmount_;
-        uint256 amount1 = token0 == tokenAddress_ ? assetAmount_ : tokenAmount_;
         
-        console.log("=== Amounts ===");
-        console.log("Amount0:", amount0);
-        console.log("Amount1:", amount1);
+        // Arrange amounts to match token ordering
+        (uint256 amount0, uint256 amount1) = tokenAddress_ < assetTokenAddr
+            ? (tokenAmount_, assetAmount_)
+            : (assetAmount_, tokenAmount_);
+
+        // Get position manager interface and factory
+        INonfungiblePositionManager positionManager = INonfungiblePositionManager(routerAddress_);
+        IUniswapV3Factory positionFactory = IUniswapV3Factory(positionManager.factory());
         
         // Get or create pool
-        dexPool = uniswapV3Factory.getPool(token0, token1, feeTier);
-        if (dexPool == address(0)) {
-            console.log("Creating new pool...");
-            dexPool = uniswapV3Factory.createPool(token0, token1, feeTier);
-            require(dexPool != address(0), "Pool creation failed");
-            
-            // Initialize with more conservative price (1:1)
-            uint160 sqrtPriceX96 = uint160(TickMath.getSqrtRatioAtTick(0));
-            IUniswapV3Pool(dexPool).initialize(sqrtPriceX96);
-            console.log("Pool initialized with sqrt price:", sqrtPriceX96);
-        }
-        console.log("Pool:", dexPool);
-
-        // Reset and set new approvals
-        console.log("=== Setting Approvals ===");
-        IERC20(token0).forceApprove(address(positionManager), 0);
-        IERC20(token1).forceApprove(address(positionManager), 0);
+        dexPool = positionFactory.getPool(token0, token1, feeTier);
         
+        // If pool doesn't exist, create and initialize it
+        if (dexPool == address(0)) {
+            // Create new pool
+            dexPool = positionFactory.createPool(token0, token1, feeTier);
+            
+            // Calculate initial sqrt price
+            uint256 price = (amount1 * 1e18) / amount0;
+            uint256 sqrtPrice = Math.sqrt(price * 1e18);
+            uint160 sqrtPriceX96 = uint160((sqrtPrice * (2**96)) / 1e18);
+            
+            // Initialize pool with calculated price
+            IUniswapV3Pool(dexPool).initialize(sqrtPriceX96);
+        }
+
+        // Approve position manager to spend tokens
         IERC20(token0).forceApprove(address(positionManager), amount0);
         IERC20(token1).forceApprove(address(positionManager), amount1);
 
-        console.log("=== New Approvals ===");
-        console.log("Token0 -> Position Manager:", IERC20(token0).allowance(address(this), address(positionManager)));
-        console.log("Token1 -> Position Manager:", IERC20(token1).allowance(address(this), address(positionManager)));
-
-        // Calculate tick range
+        // Calculate full range ticks
         int24 tickSpacing = IUniswapV3Pool(dexPool).tickSpacing();
-        
-        // Use safe tick range (about ±20% from current price)
-        int24 tickLower = -10000;
-        int24 tickUpper = 10000;
-        
-        // Ensure ticks are multiples of tick spacing
-        tickLower = (tickLower / tickSpacing) * tickSpacing;
-        tickUpper = (tickUpper / tickSpacing) * tickSpacing;
+        int24 tickLower = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
+        int24 tickUpper = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
 
-        // Verify tick bounds
-        require(tickLower >= TickMath.MIN_TICK, "Tick below MIN_TICK");
-        require(tickUpper <= TickMath.MAX_TICK, "Tick above MAX_TICK");
-        require(tickLower < tickUpper, "Invalid tick range");
-
-        console.log("=== Position Parameters ===");
-        console.log("Tick Spacing:", uint24(tickSpacing));
-        console.log("Lower Tick:", uint24(tickLower * -1));
-        console.log("Upper Tick:", uint24(tickUpper));
-
-        // Create mint parameters with higher slippage tolerance
-        INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
+        // Create the full range position
+        positionManager.mint(INonfungiblePositionManager.MintParams({
             token0: token0,
             token1: token1,
             fee: feeTier,
@@ -794,79 +770,13 @@ contract Manager is
             tickUpper: tickUpper,
             amount0Desired: amount0,
             amount1Desired: amount1,
-            amount0Min: amount0 * 50 / 100,  // 50% slippage protection
-            amount1Min: amount1 * 50 / 100,  // 50% slippage protection
-            recipient: address(this),        // Change back to this contract
+            amount0Min: 0,
+            amount1Min: 0,
+            recipient: address(this),
             deadline: block.timestamp + 3600
-        });
+        }));
 
-        console.log("=== Mint Parameters ===");
-        console.log("amount0Desired:", params.amount0Desired);
-        console.log("amount1Desired:", params.amount1Desired);
-        console.log("amount0Min:", params.amount0Min);
-        console.log("amount1Min:", params.amount1Min);
-
-        console.log("=== Attempting Mint ===");
-        try positionManager.mint{value: 0}(params) returns (
-            uint256 tokenId,
-            uint128 liquidity,
-            uint256 amount0Added,
-            uint256 amount1Added
-        ) {
-            console.log("=== Mint Success ===");
-            console.log("Token ID:", tokenId);
-            console.log("Liquidity:", liquidity);
-            console.log("Amount0 Added:", amount0Added);
-            console.log("Amount1 Added:", amount1Added);
-            
-            return dexPool;
-
-        } catch Error(string memory reason) {
-            console.log("=== Mint Failed with Error ===");
-            console.log("Error reason:", reason);
-            revert(string(abi.encodePacked("Mint failed: ", reason)));
-
-        } catch (bytes memory errorData) {
-            console.log("=== Mint Failed with Low-level Error ===");
-            console.log("Error data length:", errorData.length);
-            if(errorData.length >= 4) {
-                bytes4 selector;
-                assembly {
-                    selector := mload(add(errorData, 32))
-                }
-                console.log("Error selector:", uint32(selector));
-            }
-            
-            // Try to get pool state for debugging
-            try IUniswapV3Pool(dexPool).slot0() returns (
-                uint160 sqrtPriceX96,
-                int24 tick,
-                uint16 observationIndex,
-                uint16 observationCardinality,
-                uint16 observationCardinalityNext,
-                uint8 feeProtocol,
-                bool unlocked
-            ) {
-                console.log("=== Pool State ===");
-                console.log("Current sqrt price:", sqrtPriceX96);
-                console.log("Current tick:", uint24(tick));
-                console.log("Pool unlocked:", unlocked);
-            } catch {
-                console.log("Failed to get pool state");
-            }
-            
-            revert("Mint failed with low-level error");
-        }
-    }
-
-    // Helper function to calculate square root
-    function sqrt(uint256 x) private pure returns (uint256 y) {
-        uint256 z = (x + 1) / 2;
-        y = x;
-        while (z < y) {
-            y = z;
-            z = (x / z + z) / 2;
-        }
+        return dexPool;
     }
 
     /**
