@@ -15,11 +15,11 @@ async function main() {
   const K_CONSTANT = 3_420_000_000; // K constant for bonding curve
   const ASSET_RATE = 60_000; // Rate for asset requirements
   const GRAD_THRESHOLD_PERCENT = 50_000; // 50% threshold for graduation
-  const MAX_TX_PERCENT = 10_000; // 10% max transaction size (no limit)
+  const MAX_TX_PERCENT = 10_000; // 10% max transaction size (10% limit)
 
   // Use VANA (native token) and DEX addresses on moksha testnet
   const UNISWAP_ROUTER_ADDRESS = "0x2e7bfff8185C5a32991D2b0d68d4d2EFAaAA8F7B"; // TODO: Replace with actual DEX router on moksha
-  const ASSET_TOKEN_ADDRESS = ethers.ZeroAddress; // Using ZeroAddress to represent native token (VANA)
+  const ASSET_TOKEN_ADDRESS = '0xbccc4b4c6530F82FE309c5E845E50b5E9C89f2AD'; // (WVANA Address on moksha)
 
   console.log("Deploying Factory...");
   const Factory = await ethers.getContractFactory("Factory");

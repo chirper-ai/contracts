@@ -1,6 +1,6 @@
 // test/Manager.test.ts
 import { ethers } from "hardhat";
-import { expect, loadFixture, createToken, deployFixture } from "./helper";
+import { expect, loadFixture, createToken, deployFixture, RouterType } from "./helper";
 import type { TestContext } from "./helper";
 
 describe("Manager", function() {
@@ -145,10 +145,13 @@ describe("Manager", function() {
     });
 
     it("should maintain price impact proportional to trade size", async function() {
-      const { manager, alice, bob, router, factory, assetToken } = context;
+      const { manager, alice, owner, bob, router, factory, assetToken } = context;
       
       // Launch a token
       const agentToken = await createToken(context, alice);
+
+      // set max trade size
+      await router.connect(owner).setMaxTxPercent(100_000);
       
       // Get initial state
       const pair = await ethers.getContractAt("IBondingPair", await factory.getPair(await agentToken.getAddress(), await assetToken.getAddress()));
@@ -186,14 +189,17 @@ describe("Manager", function() {
 
   describe("Graduation", function() {
     async function graduateToken(context: TestContext) {
-      const { manager, router, alice, bob, assetToken, uniswapRouter } = context;
+      const { manager, owner, router, alice, bob, assetToken, uniswapV2Router } = context;
       
       await manager.setGradThresholdPercent(50_000);
+      await router.connect(owner).setMaxTxPercent(100_000);
       
       // Launch with DEX router
       const dexRouters = [{
-        routerAddress: await uniswapRouter.getAddress(),
-        weight: 100_000
+        routerAddress: await uniswapV2Router.getAddress(),
+        weight: 100_000,
+        routerType: RouterType.UniswapV2,
+        feeAmount: 0, // No fee for V2
       }];
       
       const agentToken = await createToken(context, alice, dexRouters);
@@ -220,7 +226,10 @@ describe("Manager", function() {
     }
 
     it("should graduate token when threshold reached", async function() {
-      const { manager, router, alice, bob, assetToken } = context;
+      const { manager, owner, router, alice, bob, assetToken } = context;
+
+      // set max trade size
+      await router.connect(owner).setMaxTxPercent(100_000);
       
       await manager.setGradThresholdPercent(50_000);
       const agentToken = await createToken(context, alice);
@@ -308,6 +317,223 @@ describe("Manager", function() {
           `Pool ${i} liquidity ratio (${actualRatio}) does not match weight (${expectedWeight})`
         );
       }
+    });
+  });
+
+  describe("Graduation with Uniswap V3", function() {
+    async function graduateTokenToV3(context: TestContext) {
+      const { manager, owner, router, alice, bob, assetToken, nftPositionManager } = context;
+      
+      await manager.setGradThresholdPercent(50_000);
+      await router.connect(owner).setMaxTxPercent(100_000);
+      
+      // Launch with V3 DEX router
+      const dexRouters = [{
+        routerAddress: await nftPositionManager.getAddress(),
+        weight: 100_000,
+        routerType: RouterType.UniswapV3,
+        feeAmount: 3000, // 0.03% fee for V3
+      }];
+      
+      const agentToken = await createToken(context, alice, dexRouters);
+      const tokenAddress = await agentToken.getAddress();
+      
+      // Buy enough to trigger graduation
+      const buyAmount = ethers.parseEther("6000"); // $60,000
+      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
+      
+      const buyTx = await manager.connect(bob).buy(buyAmount, tokenAddress);
+      await buyTx.wait();
+    
+      // Wait for state update
+      await ethers.provider.send("evm_mine", []);
+    
+      // Get token data after graduation
+      const dexPools = await manager.getDexPools(tokenAddress);
+    
+      return {
+        agentToken,
+        dexRouters,
+        dexPools
+      };
+    }
+  
+    it("should graduate token to Uniswap V3 pool", async function() {
+      const { manager, owner, router, alice, bob, assetToken, uniswapV3Factory } = context;
+  
+      // set max trade size
+      await router.connect(owner).setMaxTxPercent(100_000);
+      
+      await manager.setGradThresholdPercent(50_000);
+      
+      // Launch with V3 router
+      const dexRouters = [{
+        routerAddress: await context.uniswapV3Router.getAddress(),
+        weight: 100_000,
+        routerType: RouterType.UniswapV3,
+        feeAmount: 3000, // 0.03% fee for V3
+      }];
+      
+      const agentToken = await createToken(context, alice, dexRouters);
+      const tokenAddress = await agentToken.getAddress();
+      
+      const buyAmount = ethers.parseEther("6000");
+      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
+      
+      const tx = await manager.connect(bob).buy(buyAmount, tokenAddress);
+      const receipt = await tx.wait();
+      
+      // Check for graduation event
+      const graduatedEvent = receipt.logs.find(log => log.fragment?.name === "Graduated");
+      expect(graduatedEvent).to.not.be.undefined;
+      
+      // Verify token state
+      const tokenInfo = await manager.agentTokens(tokenAddress);
+      const dexPools = await manager.getDexPools(tokenAddress);
+      
+      expect(tokenInfo.hasGraduated).to.be.true;
+      expect(tokenInfo.isTrading).to.be.false;
+      expect(dexPools.length).to.be.gt(0);
+  
+      // Verify V3 pool creation
+      const poolAddress = await uniswapV3Factory.getPool(
+        tokenAddress,
+        await assetToken.getAddress(),
+        100
+      );
+      expect(poolAddress).to.not.equal(ethers.ZeroAddress);
+    });
+  
+    it("should initialize V3 pool with correct liquidity ranges", async function() {
+      const { assetToken, uniswapV3Factory, nftPositionManager } = context;
+      const { agentToken, dexPools } = await graduateTokenToV3(context);
+      const tokenAddress = await agentToken.getAddress();
+  
+      // Get the V3 pool
+      const poolAddress = await uniswapV3Factory.getPool(
+        tokenAddress,
+        await assetToken.getAddress(),
+        100
+      );
+      const pool = await ethers.getContractAt("IUniswapV3Pool", poolAddress);
+  
+      // Check pool initialization
+      const slot0 = await pool.slot0();
+      expect(slot0.sqrtPriceX96).to.not.equal(0);
+      expect(slot0.tick).to.not.equal(0);
+  
+      // Check liquidity
+      const liquidity = await pool.liquidity();
+      expect(liquidity).to.be.gt(0);
+  
+      // Verify position through NFT manager
+      const positions = await nftPositionManager.positions(1); // First position
+      expect(positions.liquidity).to.be.gt(0);
+      
+      // Verify tick ranges 
+      // Assuming default range of ±10% around current price
+      const currentTick = slot0.tick;
+      expect(positions.tickLower).to.be.lt(currentTick);
+      expect(positions.tickUpper).to.be.gt(currentTick);
+    });
+  
+    it("should distribute V3 liquidity effectively across price ranges", async function() {
+      const { assetToken, uniswapV3Factory } = context;
+      const { agentToken } = await graduateTokenToV3(context);
+      const tokenAddress = await agentToken.getAddress();
+  
+      const pool = await ethers.getContractAt(
+        "IUniswapV3Pool",
+        await uniswapV3Factory.getPool(
+          tokenAddress,
+          await assetToken.getAddress(),
+          100
+        )
+      );
+  
+      // Get current price and liquidity
+      const slot0 = await pool.slot0();
+      const basePrice = slot0.sqrtPriceX96;
+      
+      // Check liquidity distribution around current price
+      const tickSpacing = await pool.tickSpacing();
+      const currentTick = slot0.tick;
+      
+      // Sample liquidity at different tick ranges
+      const ranges = [-2, -1, 0, 1, 2].map(i => currentTick + (i * tickSpacing));
+      
+      let previousLiquidity = 0n;
+      for (const tick of ranges) {
+        const liquidityNet = await pool.ticks(tick);
+        // Ensure we have some liquidity changes at different ticks
+        expect(liquidityNet).to.not.equal(previousLiquidity);
+        previousLiquidity = liquidityNet;
+      }
+    });
+  
+    it("should migrate to both V2 and V3 pools during graduation", async function() {
+      const { manager, owner, router, alice, bob, assetToken, uniswapV2Router, uniswapV3Router, uniswapV2Factory, uniswapV3Factory } = context;
+      
+      await manager.setGradThresholdPercent(50_000);
+      await router.connect(owner).setMaxTxPercent(100_000);
+      
+      // Launch with both V2 and V3 routers
+      const dexRouters = [
+        {
+          routerAddress: await uniswapV2Router.getAddress(),
+          weight: 50_000,
+          routerType: RouterType.UniswapV2,
+          feeAmount: 0, // No fee for V2
+        },
+        {
+          routerAddress: await uniswapV3Router.getAddress(),
+          weight: 50_000,
+          routerType: RouterType.UniswapV3,
+          feeAmount: 3000, // 0.03% fee for V3
+        }
+      ];
+      
+      const agentToken = await createToken(context, alice, dexRouters);
+      const tokenAddress = await agentToken.getAddress();
+      
+      // Trigger graduation
+      const buyAmount = ethers.parseEther("6000");
+      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
+      await manager.connect(bob).buy(buyAmount, tokenAddress);
+      
+      // Check V2 pool
+      const v2PairAddress = await uniswapV2Factory.getPair(
+        tokenAddress,
+        await assetToken.getAddress()
+      );
+      expect(v2PairAddress).to.not.equal(ethers.ZeroAddress);
+      
+      const v2Pair = await ethers.getContractAt("IUniswapV2Pair", v2PairAddress);
+      const [v2Reserve0, v2Reserve1] = await v2Pair.getReserves();
+      expect(v2Reserve0).to.be.gt(0);
+      expect(v2Reserve1).to.be.gt(0);
+      
+      // Check V3 pool
+      const v3PoolAddress = await uniswapV3Factory.getPool(
+        tokenAddress,
+        await assetToken.getAddress(),
+        100
+      );
+      expect(v3PoolAddress).to.not.equal(ethers.ZeroAddress);
+      
+      const v3Pool = await ethers.getContractAt("IUniswapV3Pool", v3PoolAddress);
+      const v3Liquidity = await v3Pool.liquidity();
+      expect(v3Liquidity).to.be.gt(0);
+      
+      // Verify proportional liquidity distribution
+      const v2TVL = v2Reserve0 * v2Reserve1;
+      const slot0 = await v3Pool.slot0();
+      const v3TVL = v3Liquidity * (slot0.sqrtPriceX96 ** 2n);
+      
+      // Check if TVL split is roughly 50/50 (within 10% tolerance)
+      const totalTVL = v2TVL + v3TVL;
+      const v2Ratio = (v2TVL * 100_000n) / totalTVL;
+      expect(Number(v2Ratio)).to.be.within(45_000, 55_000);
     });
   });
 

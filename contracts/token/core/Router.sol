@@ -75,6 +75,7 @@ contract Router is
     ) external initializer {
         __ReentrancyGuard_init();
         __AccessControl_init();
+        _grantRole(ADMIN_ROLE, msg.sender);
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
 
         require(factory_ != address(0), "Invalid factory");

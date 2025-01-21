@@ -4,8 +4,11 @@
     "@nomiclabs/hardhat-waffle": "^2.0.6",
     "@openzeppelin/contracts": "^5.2.0",
     "@openzeppelin/contracts-upgradeable": "^5.2.0",
+    "@uniswap/universal-router": "2.0.0-beta.2",
     "@uniswap/v2-core": "^1.0.1",
     "@uniswap/v2-periphery": "1.1.0-beta.0",
+    "@uniswap/v3-core": "^1.0.1",
+    "@uniswap/v3-periphery": "^1.4.4",
     "dotenv": "^16.4.7",
     "ethers": "^6.13.5",
     "hardhat": "^2.22.18"
