@@ -1,22 +1,18 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
 // openzeppelin
 import "@openzeppelin/contracts/utils/math/Math.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 // uniswap v2
 import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
-import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
 import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 
 // uniswap v3 simplified
-import "../libraries/TickMath.sol";
 import "../interfaces/UniswapV3/IUniswapV3Pool.sol";
 import "../interfaces/UniswapV3/IUniswapV3Factory.sol";
 import "../interfaces/UniswapV3/INonfungiblePositionManager.sol";
@@ -26,8 +22,8 @@ import "../interfaces/Velodrome/IVelodromeRouter.sol";
 import "../interfaces/Velodrome/IVelodromeFactory.sol";
 
 // locals
-import "./Factory.sol";
-import "./Router.sol";
+import "../interfaces/IFactory.sol";
+import "../interfaces/IRouter.sol";
 import "./Token.sol";
 
 // interfaces
@@ -68,19 +64,19 @@ contract Manager is
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Factory contract for creating token pairs
-    Factory public factory;
+    IFactory public factory;
 
     /// @notice Router contract for token trading operations
-    Router public router;
+    IRouter public router;
 
     /// @notice Initial token supply for new agent tokens
     uint256 public initialSupply;
 
     /// @notice Rate used in asset requirement calculations
-    uint256 public assetRate;
+    uint64 public assetRate;
 
     /// @notice Percentage threshold required for graduation eligibility
-    uint256 public gradThresholdPercent;
+    uint64 public gradThreshold;
 
     /*//////////////////////////////////////////////////////////////
                                   STRUCTS
@@ -89,8 +85,8 @@ contract Manager is
     /// @notice Router information for token graduation
     struct DexRouter {
         address routerAddress; // Address of the DEX router
-        uint256 feeAmount;     // Fee amount for the DEX router
-        uint256 weight;        // Weight for liquidity distribution (1-100)
+        uint24 feeAmount;     // Fee amount for the DEX router
+        uint24 weight;        // Weight for liquidity distribution (1-100)
         RouterType routerType; // Type of DEX router (UniswapV2 or UniswapV3)
     }
 
@@ -100,9 +96,9 @@ contract Manager is
      * @param name Full token name
      * @param ticker Trading symbol
      * @param totalSupply Total token supply
-     * @param circulatingSupply Tokens in circulation (not in bonding pair)
+     * @param circSupply Tokens in circulation (not in bonding pair)
      * @param price Current price in VANA (1e18 decimals)
-     * @param marketCap Market cap (circulating * price)
+     * @param cap Market cap (circulating * price)
      * @param fdv Fully diluted value (totalSupply * price)
      * @param tvl Total value locked in bonding pair
      * @param lastUpdate Last update timestamp
@@ -112,9 +108,9 @@ contract Manager is
         string name;               // Full token name
         string ticker;             // Trading symbol
         uint256 totalSupply;       // Total token supply
-        uint256 circulatingSupply; // Tokens in circulation (not in bonding pair)
+        uint256 circSupply;        // Tokens in circulation (not in bonding pair)
         uint256 price;             // Current price in VANA (1e18 decimals)
-        uint256 marketCap;         // Market cap (circulating * price)
+        uint256 cap;               // Market cap (circulating * price)
         uint256 fdv;               // Fully diluted value (totalSupply * price)
         uint256 tvl;               // Total value locked in bonding pair
         uint256 lastUpdate;        // Last update timestamp
@@ -127,12 +123,10 @@ contract Manager is
      * @param intention Purpose of the token
      * @param url Reference URL for the token
      * @param metrics Comprehensive token metrics
-     * @param isTrading Whether the token is currently trading
      * @param hasGraduated Whether the token has graduated to DEXes
      * @param bondingPair Address of the bonding curve pair
      * @param dexRouters Array of DEX routers and their weights
      * @param dexPools Array of DEX pairs created during graduation
-     * @param mainDexPool This is at the end
      */
     struct TokenData {
         address creator;
@@ -140,12 +134,10 @@ contract Manager is
         string intention;
         string url;
         TokenMetrics metrics;
-        bool isTrading;
         bool hasGraduated;
-        address bondingPair;     
-        DexRouter[] dexRouters; 
-        address[] dexPools;      // This is at the end
-        address mainDexPool;
+        address bondingPair;
+        DexRouter[] dexRouters;
+        address[] dexPools;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -172,11 +164,10 @@ contract Manager is
     event MetricsUpdated(
         address indexed token,
         uint256 totalSupply,
-        uint256 circulatingSupply,
+        uint256 circSupply,
         uint256 price,
-        uint256 marketCap,
-        uint256 liquidity,
-        uint256 volume24h
+        uint256 cap,
+        uint256 fdv
     );
 
     /*//////////////////////////////////////////////////////////////
@@ -198,16 +189,16 @@ contract Manager is
      * @param router_ Address of the Router contract
      * @param initSupply_ Initial token supply
      * @param kConstant_ Bonding curve constant
-     * @param assetRateValue_ Asset rate for calculations
-     * @param gradThresholdPercent_ Graduation threshold percentage
+     * @param assetRate_ Asset rate for calculations
+     * @param gradThreshold_ Graduation threshold percentage
      */
     function initialize(
         address factory_,
         address router_,
         uint256 initSupply_,
         uint256 kConstant_,
-        uint256 assetRateValue_,
-        uint256 gradThresholdPercent_
+        uint64 assetRate_,
+        uint64 gradThreshold_
     ) external initializer {
         __Ownable_init(msg.sender);
         __ReentrancyGuard_init();
@@ -216,11 +207,11 @@ contract Manager is
         require(router_ != address(0), "Invalid router");
 
         K = kConstant_;
-        factory = Factory(factory_);
-        router = Router(router_);
+        factory = IFactory(factory_);
+        router = IRouter(router_);
         initialSupply = initSupply_;
-        assetRate = assetRateValue_;
-        gradThresholdPercent = gradThresholdPercent_;
+        assetRate = assetRate_;
+        gradThreshold = gradThreshold_;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -241,23 +232,23 @@ contract Manager is
      * @param ticker_ Trading symbol for the token
      * @param intention_ Purpose/mission of the token
      * @param url_ Reference URL for the token
-     * @param purchaseAmount_ Amount of asset tokens (VANA) to spend on launch
+     * @param initBuy_ Amount of asset tokens (VANA) to spend on launch
      * @param dexRouters_ Array of DEX routers and weights for future graduation
      * @return token Address of the newly created token
      * @return pair Address of the bonding pair
      * @return index Index in the agentTokenList
      */
     function launch(
-        string memory name_,
-        string memory ticker_,
-        string memory intention_,
-        string memory url_,
-        uint256 purchaseAmount_,
-        DexRouter[] memory dexRouters_
+        string calldata name_,
+        string calldata ticker_,
+        string calldata intention_,
+        string calldata url_,
+        uint256 initBuy_,
+        DexRouter[] calldata dexRouters_
     ) external nonReentrant returns (address token, address pair, uint256 index) {
         // Validate DEX router configuration
         require(dexRouters_.length > 0, "Must provide at least one DEX router");
-        uint256 totalWeight;
+        uint24 totalWeight;
         for(uint i = 0; i < dexRouters_.length; i++) {
             require(dexRouters_[i].routerAddress != address(0), "Invalid router address");
             require(dexRouters_[i].weight > 0 && dexRouters_[i].weight <= 100_000, "Invalid weight");
@@ -268,12 +259,12 @@ contract Manager is
         // Check asset token balance and collect launch tax
         address assetToken_ = router.assetToken();
         require(
-            IERC20(assetToken_).balanceOf(msg.sender) >= purchaseAmount_,
+            IERC20(assetToken_).balanceOf(msg.sender) >= initBuy_,
             "Insufficient funds"
         );
 
-        uint256 launchTax = (purchaseAmount_ * factory.launchTax()) / 100_000;
-        uint256 initialPurchase = purchaseAmount_ - launchTax;
+        uint256 launchTax = (initBuy_ * factory.launchTax()) / 100_000;
+        uint256 initialPurchase = initBuy_ - launchTax;
         
         // Transfer launch tax to tax vault
         IERC20(assetToken_).safeTransferFrom(msg.sender, factory.taxVault(), launchTax);
@@ -298,7 +289,8 @@ contract Manager is
         address newBondingPair = factory.createPair(address(actualToken), assetToken_);
         uint256 totalSupply = actualToken.totalSupply();
 
-        require(_approve(address(router), address(actualToken), totalSupply));
+        // force approve
+        IERC20(address(actualToken)).forceApprove(address(router), totalSupply);
 
         // Calculate initial liquidity
         uint256 k = K * 1 ether;  // Scale k to 18 decimals
@@ -316,9 +308,9 @@ contract Manager is
             name: name_,
             ticker: ticker_,
             totalSupply: totalSupply,
-            circulatingSupply: 0,  // Initially 0 as all tokens in bonding pair
+            circSupply: 0,  // Initially 0 as all tokens in bonding pair
             price: initialPrice,
-            marketCap: 0,  // Initially 0 as no circulating supply
+            cap: 0,  // Initially 0 as no circulating supply
             fdv: (totalSupply * initialPrice) / 1e18,
             tvl: initialPurchase * 2,  // Double the VANA liquidity
             lastUpdate: block.timestamp
@@ -332,11 +324,9 @@ contract Manager is
             intention: intention_,
             url: url_,
             metrics: metrics,
-            isTrading: true,
             hasGraduated: false,
             dexRouters: dexRouters_,
-            dexPools: new address[](0),
-            mainDexPool: address(0)
+            dexPools: new address[](0)
         });
 
         agentTokens[address(actualToken)] = localToken;
@@ -362,8 +352,8 @@ contract Manager is
         actualToken.transfer(msg.sender, receivedTokens);
 
         // Update metrics after initial purchase
-        (uint256 reserveToken, uint256 reserveAsset) = IBondingPair(newBondingPair).getReserves();
-        _updateMetrics(address(actualToken), reserveToken, reserveAsset, initialPurchase);
+        (uint256 reserveToken,) = IBondingPair(newBondingPair).getReserves();
+        _updateMetrics(address(actualToken), reserveToken);
 
         return (address(actualToken), newBondingPair, tokenIndex);
     }
@@ -378,7 +368,7 @@ contract Manager is
         uint256 amountIn_,
         address tokenAddress_
     ) external payable returns (bool) {
-        require(agentTokens[tokenAddress_].isTrading, "Trading not active");
+        require(!agentTokens[tokenAddress_].hasGraduated, "Trading not active");
 
         address pairAddress = factory.getPair(
             tokenAddress_,
@@ -386,22 +376,19 @@ contract Manager is
         );
 
         IBondingPair pair = IBondingPair(pairAddress);
-        (uint256 reserveA, uint256 reserveB) = pair.getReserves();
+        (uint256 reserveA,) = pair.getReserves();
 
-        (uint256 amount1In, uint256 amount0Out) = router.buy(
+        (,uint256 amount0Out) = router.buy(
             amountIn_,
             tokenAddress_,
             msg.sender
         );
 
         uint256 newReserveA = reserveA - amount0Out;
-        uint256 newReserveB = reserveB + amount1In;
 
         _updateMetrics(
             tokenAddress_,
-            newReserveA,
-            newReserveB,
-            amount1In
+            newReserveA
         );
 
         uint256 totalSupply = IERC20(tokenAddress_).totalSupply();
@@ -409,7 +396,7 @@ contract Manager is
 
         uint256 reservePercentage = (newReserveA * 100_000) / totalSupply;
         
-        if (reservePercentage <= gradThresholdPercent) {
+        if (reservePercentage <= gradThreshold) {
             _graduate(tokenAddress_);
         }
 
@@ -426,7 +413,7 @@ contract Manager is
         uint256 amountIn_,
         address tokenAddress_
     ) external returns (bool) {
-        require(agentTokens[tokenAddress_].isTrading, "Trading not active");
+        require(!agentTokens[tokenAddress_].hasGraduated, "Trading not active");
 
         address pairAddress = factory.getPair(
             tokenAddress_,
@@ -434,9 +421,9 @@ contract Manager is
         );
 
         IBondingPair pair = IBondingPair(pairAddress);
-        (uint256 reserveA, uint256 reserveB) = pair.getReserves();
+        (uint256 reserveA,) = pair.getReserves();
         
-        (uint256 amount0In, uint256 amount1Out) = router.sell(
+        (uint256 amount0In,) = router.sell(
             amountIn_,
             tokenAddress_,
             msg.sender
@@ -444,9 +431,7 @@ contract Manager is
 
         _updateMetrics(
             tokenAddress_,
-            reserveA + amount0In,
-            reserveB - amount1Out,
-            amount1Out
+            reserveA + amount0In
         );
 
         return true;
@@ -457,46 +442,27 @@ contract Manager is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Calculates the circulating supply of a token
-     * @param tokenAddress_ Address of the token
-     * @param totalSupply_ Total supply of the token
+     * @notice Updates token metrics after a trade or during launch
+     * @dev Uses router's getAmountsOut for accurate price calculation
+     * @param tokenAddress_ Address of the token being updated
+     * @param newReserveToken_ Current token balance in bonding pair
      */
-    function calculateCirculatingSupply(
+    function _updateMetrics(
         address tokenAddress_,
-        uint256 totalSupply_
-    ) internal view returns (uint256) {
+        uint256 newReserveToken_
+    ) private {
         Token token = Token(tokenAddress_);
         TokenData storage tokenData = agentTokens[tokenAddress_];
+        
+        // Get total supply from token contract
+        uint256 totalSupply = Token(tokenAddress_).totalSupply();
         
         // Get locked/non-circulating balances
         uint256 bondingReserves = token.balanceOf(tokenData.bondingPair);
         uint256 deadBalance = token.balanceOf(address(0));  // Burned tokens
         
-        return totalSupply_ - bondingReserves - deadBalance;
-    }
-
-    /**
-     * @notice Updates token metrics after a trade or during launch
-     * @dev Uses router's getAmountsOut for accurate price calculation
-     * @param tokenAddress_ Address of the token being updated
-     * @param newReserveToken_ Current token balance in bonding pair
-     * @param newReserveAsset_ Current VANA balance in bonding pair
-     * @param amount_ Amount involved in transaction (not used for metrics)
-     */
-    function _updateMetrics(
-        address tokenAddress_,
-        uint256 newReserveToken_,
-        uint256 newReserveAsset_,
-        uint256 amount_
-    ) private {
-        TokenData storage token = agentTokens[tokenAddress_];
-        
-        // Get total supply from token contract
-        uint256 totalSupply = Token(tokenAddress_).totalSupply();
-        require(totalSupply > 0, "Invalid total supply");
-        
         // Calculate circulating supply (total - bonding pair balance)
-        uint256 circulatingSupply = calculateCirculatingSupply(tokenAddress_, totalSupply);
+        uint256 circSupply = totalSupply - bondingReserves - deadBalance;
         
         // Calculate price using router's getAmountsOut
         // Get price for 1 token (1e18 units) to maintain precision
@@ -508,28 +474,25 @@ contract Manager is
         }
         
         // Calculate market metrics using price with 1e18 precision
-        uint256 marketCap = (circulatingSupply * price) / 1e18;
+        uint256 cap = (circSupply * price) / 1e18;
         uint256 fdv = (totalSupply * price) / 1e18;
-        uint256 tvl = IERC20(router.assetToken()).balanceOf(token.bondingPair) * 2;
+        uint256 tvl = IERC20(router.assetToken()).balanceOf(tokenData.bondingPair) * 2;
         
         // Update metrics
-        token.metrics.tokenAddr = tokenAddress_;
-        token.metrics.totalSupply = totalSupply;
-        token.metrics.circulatingSupply = circulatingSupply;
-        token.metrics.price = price;
-        token.metrics.marketCap = marketCap;
-        token.metrics.fdv = fdv;
-        token.metrics.tvl = tvl;
-        token.metrics.lastUpdate = block.timestamp;
+        tokenData.metrics.circSupply = circSupply;
+        tokenData.metrics.price = price;
+        tokenData.metrics.cap = cap;
+        tokenData.metrics.fdv = fdv;
+        tokenData.metrics.tvl = tvl;
+        tokenData.metrics.lastUpdate = block.timestamp;
         
         emit MetricsUpdated(
             tokenAddress_,
             totalSupply,
-            circulatingSupply,
+            circSupply,
             price,
-            marketCap,
-            fdv,
-            tvl
+            cap,
+            fdv
         );
     }
 
@@ -539,7 +502,7 @@ contract Manager is
      */
     function _graduate(address tokenAddress_) private {
         TokenData storage token = agentTokens[tokenAddress_];
-        require(token.isTrading && !token.hasGraduated, "Invalid graduation state");
+        require(!token.hasGraduated, "Invalid graduation state");
 
         // Extract liquidity from bonding curve
         (uint256 tokenBalance, uint256 assetBalance) = _extractBondingCurveLiquidity(tokenAddress_);
@@ -554,9 +517,7 @@ contract Manager is
 
         // Update token data with new pairs
         token.dexPools = newPairs;
-        token.isTrading = false;
         token.hasGraduated = true;
-        token.mainDexPool = newPairs[0];
 
         emit Graduated(tokenAddress_);
     }
@@ -604,34 +565,24 @@ contract Manager is
         uint256 totalTokens_,
         uint256 totalAssets_
     ) private returns (address[] memory pairs) {
-        address[] memory newPairs = new address[](dexRouters_.length);
+        uint256 length = dexRouters_.length;
+        address[] memory newPairs = new address[](length);
 
-        for (uint i = 0; i < dexRouters_.length; i++) {
-            uint256 tokenAmount = (totalTokens_ * dexRouters_[i].weight) / 100_000;
-            uint256 assetAmount = (totalAssets_ * dexRouters_[i].weight) / 100_000;
+        uint256 denominator = 100_000;  // Reduce repeated division operations
 
-            if (dexRouters_[i].routerType == RouterType.UniswapV2) {
-                newPairs[i] = _deployToUniswapV2(
-                    tokenAddress_,
-                    dexRouters_[i].routerAddress,
-                    tokenAmount,
-                    assetAmount
-                );
-            } else if (dexRouters_[i].routerType == RouterType.UniswapV3) {
-                newPairs[i] = _deployToUniswapV3(
-                    tokenAddress_,
-                    dexRouters_[i].routerAddress,
-                    tokenAmount,
-                    assetAmount,
-                    dexRouters_[i].feeAmount
-                );
-            } else if (dexRouters_[i].routerType == RouterType.Velodrome) {
-                newPairs[i] = _deployToVelodrome(
-                    tokenAddress_,
-                    dexRouters_[i].routerAddress,
-                    tokenAmount,
-                    assetAmount
-                );
+        for (uint256 i = 0; i < length; ++i) {
+            DexRouter memory dexRouter = dexRouters_[i];  // Cache the struct in memory
+
+            uint256 tokenAmount = (totalTokens_ * dexRouter.weight) / denominator;
+            uint256 assetAmount = (totalAssets_ * dexRouter.weight) / denominator;
+
+            if (dexRouter.routerType == RouterType.UniswapV2) {
+                newPairs[i] = _deployUniV2(tokenAddress_, dexRouter.routerAddress, tokenAmount, assetAmount);
+            } else if (dexRouter.routerType == RouterType.UniswapV3) {
+                newPairs[i] = _deployUniV3(tokenAddress_, dexRouter.routerAddress, tokenAmount, assetAmount, dexRouter.feeAmount);
+            } else {
+                // Assuming Velodrome is the only remaining option
+                newPairs[i] = _deployVelo(tokenAddress_, dexRouter.routerAddress, tokenAmount, assetAmount);
             }
         }
 
@@ -647,7 +598,7 @@ contract Manager is
      * @param assetAmount_ Amount of asset tokens to provide as liquidity
      * @return dexPool Address of the created or existing DEX pool
      */
-    function _deployToUniswapV2(
+    function _deployUniV2(
         address tokenAddress_,
         address routerAddress_,
         uint256 tokenAmount_,
@@ -655,47 +606,40 @@ contract Manager is
     ) private returns (address dexPool) {
         address assetTokenAddr = router.assetToken();
         IUniswapV2Router02 dexRouter = IUniswapV2Router02(routerAddress_);
+        IUniswapV2Factory dexFactory = IUniswapV2Factory(dexRouter.factory());
 
-        IERC20(tokenAddress_).forceApprove(address(dexRouter), tokenAmount_);
-        IERC20(assetTokenAddr).forceApprove(address(dexRouter), assetAmount_);
+        IERC20 token = IERC20(tokenAddress_);
+        IERC20 assetToken = IERC20(assetTokenAddr);
 
-        address dexFactory = dexRouter.factory();
+        // Approve tokens for router in a single step
+        token.forceApprove(address(dexRouter), tokenAmount_);
+        assetToken.forceApprove(address(dexRouter), assetAmount_);
 
-        dexPool = IUniswapV2Factory(dexFactory).getPair(
-            tokenAddress_,
-            assetTokenAddr
-        );
-
+        // Check if the pair exists, if not create it
+        dexPool = dexFactory.getPair(tokenAddress_, assetTokenAddr);
         if (dexPool == address(0)) {
-            dexPool = IUniswapV2Factory(dexFactory).createPair(
-                tokenAddress_,
-                assetTokenAddr
-            );
+            dexPool = dexFactory.createPair(tokenAddress_, assetTokenAddr);
         }
 
-        require(dexPool != address(0), "Failed to get/create DEX pair");
+        // Precompute slippage tolerance values (95% of provided amount)
+        uint256 minTokenAmount = (tokenAmount_ * 95) / 100;
+        uint256 minAssetAmount = (assetAmount_ * 95) / 100;
 
-        (uint256 amountToken, uint256 amountAsset, uint256 liquidity) = 
-            dexRouter.addLiquidity(
-                tokenAddress_,
-                assetTokenAddr,
-                tokenAmount_,
-                assetAmount_,
-                tokenAmount_ * 95 / 100,
-                assetAmount_ * 95 / 100,
-                address(0),
-                block.timestamp + 3600
-            );
-
-        require(
-            amountToken >= tokenAmount_ * 95 / 100 &&
-            amountAsset >= assetAmount_ * 95 / 100 &&
-            liquidity > 0,
-            "Liquidity addition failed requirements"
+        // Add liquidity with calculated minimums
+        dexRouter.addLiquidity(
+            tokenAddress_,
+            assetTokenAddr,
+            tokenAmount_,
+            assetAmount_,
+            minTokenAmount,
+            minAssetAmount,
+            address(0),
+            block.timestamp + 3600
         );
 
         return dexPool;
     }
+
 
     /**
      * @notice Deploys liquidity to a Uniswap V3 pool with full range coverage
@@ -710,7 +654,6 @@ contract Manager is
      * 4. Create full-range position
      *
      * Technical notes:
-     * - Uses TickMath for full range (-887220 to +887220)
      * - sqrtPriceX96 is in Q64.96 format
      * - Assumes amounts provided are already correctly proportioned
      * - Sets minimum amounts to 1 to allow maximum slippage
@@ -722,44 +665,38 @@ contract Manager is
      * @param feeAmount_ Fee tier for the pool (500 = 0.05%, 3000 = 0.3%, 10000 = 1%)
      * @return dexPool Address of the created/existing V3 pool
      */
-    function _deployToUniswapV3(
+    function _deployUniV3(
         address tokenAddress_,
         address routerAddress_,
         uint256 tokenAmount_,
         uint256 assetAmount_,
-        uint256 feeAmount_
+        uint24 feeAmount_
     ) private returns (address dexPool) {
         address assetTokenAddr = router.assetToken();
-        uint24 feeTier = uint24(feeAmount_);
-
+        
         // Sort tokens according to V3 requirements (token0 < token1)
-        (address token0, address token1) = tokenAddress_ < assetTokenAddr 
+        bool isTokenFirst = tokenAddress_ < assetTokenAddr;
+        (address token0, address token1) = isTokenFirst 
             ? (tokenAddress_, assetTokenAddr) 
             : (assetTokenAddr, tokenAddress_);
-        
-        // Arrange amounts to match token ordering
-        (uint256 amount0, uint256 amount1) = tokenAddress_ < assetTokenAddr
+            
+        (uint256 amount0, uint256 amount1) = isTokenFirst
             ? (tokenAmount_, assetAmount_)
             : (assetAmount_, tokenAmount_);
 
-        // Get position manager interface and factory
+        // Get position manager and factory
         INonfungiblePositionManager positionManager = INonfungiblePositionManager(routerAddress_);
         IUniswapV3Factory positionFactory = IUniswapV3Factory(positionManager.factory());
-        
+
         // Get or create pool
-        dexPool = positionFactory.getPool(token0, token1, feeTier);
-        
-        // If pool doesn't exist, create and initialize it
+        dexPool = positionFactory.getPool(token0, token1, feeAmount_);
         if (dexPool == address(0)) {
-            // Create new pool
-            dexPool = positionFactory.createPool(token0, token1, feeTier);
-            
-            // Calculate initial sqrt price
+            dexPool = positionFactory.createPool(token0, token1, feeAmount_);
+
+            // Calculate initial sqrt price and initialize pool
             uint256 price = (amount1 * 1e18) / amount0;
             uint256 sqrtPrice = Math.sqrt(price * 1e18);
             uint160 sqrtPriceX96 = uint160((sqrtPrice * (2**96)) / 1e18);
-            
-            // Initialize pool with calculated price
             IUniswapV3Pool(dexPool).initialize(sqrtPriceX96);
         }
 
@@ -769,14 +706,14 @@ contract Manager is
 
         // Calculate full range ticks
         int24 tickSpacing = IUniswapV3Pool(dexPool).tickSpacing();
-        int24 tickLower = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
-        int24 tickUpper = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
+        int24 tickLower = (-887272 / tickSpacing) * tickSpacing;
+        int24 tickUpper = (887272 / tickSpacing) * tickSpacing;
 
         // Create the full range position
         positionManager.mint(INonfungiblePositionManager.MintParams({
             token0: token0,
             token1: token1,
-            fee: feeTier,
+            fee: feeAmount_,
             tickLower: tickLower,
             tickUpper: tickUpper,
             amount0Desired: amount0,
@@ -800,7 +737,7 @@ contract Manager is
      * @param assetAmount_ Amount of asset tokens to provide as liquidity
      * @return dexPool Address of the created or existing Velodrome pool
      */
-    function _deployToVelodrome(
+    function _deployVelo(
         address tokenAddress_,
         address routerAddress_,
         uint256 tokenAmount_,
@@ -832,46 +769,21 @@ contract Manager is
             );
         }
 
-        require(dexPool != address(0), "Failed to get/create Velodrome pair");
-
         // Add liquidity to the pool
-        (uint256 amountToken, uint256 amountAsset, uint256 liquidity) = 
-            veloRouter.addLiquidity(
-                tokenAddress_,
-                assetTokenAddr,
-                isStable,
-                tokenAmount_,
-                assetAmount_,
-                tokenAmount_ * 95 / 100,  // 5% slippage tolerance
-                assetAmount_ * 95 / 100,
-                address(0),
-                block.timestamp + 3600
-            );
-
-        require(
-            amountToken >= tokenAmount_ * 95 / 100 &&
-            amountAsset >= assetAmount_ * 95 / 100 &&
-            liquidity > 0,
-            "Velodrome liquidity addition failed requirements"
+        veloRouter.addLiquidity(
+            tokenAddress_,
+            assetTokenAddr,
+            isStable,
+            tokenAmount_,
+            assetAmount_,
+            tokenAmount_ * 95 / 100,  // 5% slippage tolerance
+            assetAmount_ * 95 / 100,
+            address(0),
+            block.timestamp + 3600
         );
+            
 
         return dexPool;
-    }
-
-    /**
-     * @notice Internal helper to approve token spending
-     * @param spender_ Address to approve
-     * @param tokenAddress_ Token to approve
-     * @param amount_ Amount to approve
-     * @return success Whether the approval succeeded
-     */
-    function _approve(
-        address spender_,
-        address tokenAddress_,
-        uint256 amount_
-    ) internal returns (bool) {
-        IERC20(tokenAddress_).forceApprove(spender_, amount_);
-        return true;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -888,17 +800,17 @@ contract Manager is
 
     /**
      * @notice Updates the graduation threshold percentage
-     * @param newThresholdPercent_ New threshold percentage value
+     * @param gradThreshold_ New threshold percentage value
      */
-    function setGradThresholdPercent(uint256 newThresholdPercent_) external onlyOwner {
-        gradThresholdPercent = newThresholdPercent_;
+    function setGradThreshold(uint64 gradThreshold_) external onlyOwner {
+        gradThreshold = gradThreshold_;
     }
 
     /**
      * @notice Updates the asset rate used in calculations
      * @param newRate_ New asset rate value
      */
-    function setAssetRate(uint256 newRate_) external onlyOwner {
+    function setAssetRate(uint64 newRate_) external onlyOwner {
         require(newRate_ > 0, "Rate must be positive");
         assetRate = newRate_;
     }

@@ -19,6 +19,7 @@
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "@openzeppelin/hardhat-upgrades": "^3.8.0",
     "chai": "4.3.7",
+    "hardhat-contract-sizer": "^2.10.0",
     "ts-node": "^10.9.2"
   }
 }

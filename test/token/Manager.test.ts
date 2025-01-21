@@ -20,7 +20,7 @@ describe("Manager", function() {
       expect(Number(await factory.launchTax())).to.equal(5_000); // 5%
       expect(Number(await manager.initialSupply())).to.equal(1_000_000);
       expect(Number(await manager.assetRate())).to.equal(60_000);
-      expect(Number(await manager.gradThresholdPercent())).to.equal(50_000);
+      expect(Number(await manager.gradThreshold())).to.equal(50_000);
     });
 
     it("should have correct owner", async function() {
@@ -87,7 +87,7 @@ describe("Manager", function() {
       
       const metrics = await manager.agentTokens(await agentToken.getAddress());
       expect(Number(metrics.metrics.price)).to.be.gt(Number(beforeMetrics.metrics.price));
-      expect(Number(metrics.metrics.marketCap)).to.be.gt(Number(beforeMetrics.metrics.marketCap));
+      expect(Number(metrics.metrics.cap)).to.be.gt(Number(beforeMetrics.metrics.cap));
     });
 
     it("should maintain constant product K after buys", async function() {
@@ -191,7 +191,7 @@ describe("Manager", function() {
     async function graduateToken(context: TestContext) {
       const { manager, owner, router, alice, bob, assetToken, uniswapV2Router } = context;
       
-      await manager.setGradThresholdPercent(50_000);
+      await manager.setGradThreshold(50_000);
       await router.connect(owner).setMaxTxPercent(100_000);
       
       // Launch with DEX router
@@ -231,7 +231,7 @@ describe("Manager", function() {
       // set max trade size
       await router.connect(owner).setMaxTxPercent(100_000);
       
-      await manager.setGradThresholdPercent(50_000);
+      await manager.setGradThreshold(50_000);
       const agentToken = await createToken(context, alice);
       const tokenAddress = await agentToken.getAddress();
       
@@ -250,7 +250,6 @@ describe("Manager", function() {
       const dexPools = await manager.getDexPools(tokenAddress);
       
       expect(tokenInfo.hasGraduated).to.be.true;
-      expect(tokenInfo.isTrading).to.be.false;
       expect(dexPools.length).to.be.gt(0); // Should have at least one DEX pair
     });
 
@@ -324,7 +323,7 @@ describe("Manager", function() {
     async function graduateTokenToV3(context: TestContext) {
       const { manager, owner, router, alice, bob, assetToken, nftPositionManager } = context;
       
-      await manager.setGradThresholdPercent(50_000);
+      await manager.setGradThreshold(50_000);
       await router.connect(owner).setMaxTxPercent(100_000);
       
       // Launch with V3 DEX router
@@ -364,7 +363,7 @@ describe("Manager", function() {
       // set max trade size
       await router.connect(owner).setMaxTxPercent(100_000);
       
-      await manager.setGradThresholdPercent(50_000);
+      await manager.setGradThreshold(50_000);
       
       // Launch with V3 router
       const dexRouters = [{
@@ -392,7 +391,6 @@ describe("Manager", function() {
       const dexPools = await manager.getDexPools(tokenAddress);
       
       expect(tokenInfo.hasGraduated).to.be.true;
-      expect(tokenInfo.isTrading).to.be.false;
       expect(dexPools.length).to.be.gt(0);
   
       // Verify V3 pool creation
@@ -441,7 +439,7 @@ describe("Manager", function() {
       const { manager, owner, router, alice, bob, assetToken, uniswapV2Router, 
         nftPositionManager, uniswapV2Factory, uniswapV3Factory } = context;
       
-      await manager.setGradThresholdPercent(50_000);
+      await manager.setGradThreshold(50_000);
       await router.connect(owner).setMaxTxPercent(100_000);
       
       // Launch with both V2 and V3 routers
@@ -540,9 +538,9 @@ describe("Manager", function() {
       const { manager, owner } = context;
       
       const newThreshold = 100;
-      await manager.connect(owner).setGradThresholdPercent(newThreshold);
+      await manager.connect(owner).setGradThreshold(newThreshold);
       
-      expect(Number(await manager.gradThresholdPercent())).to.equal(Number(newThreshold));
+      expect(Number(await manager.gradThreshold())).to.equal(Number(newThreshold));
     });
   });
 });

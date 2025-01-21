@@ -7,8 +7,8 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
-import "./Factory.sol";
-import "./Token.sol";
+import "../interfaces/IFactory.sol";
+import "../interfaces/IToken.sol";
 
 // bonding pair
 import "../interfaces/IBondingPair.sol";
@@ -41,7 +41,7 @@ contract Router is
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Factory contract reference for pair and tax management
-    Factory public factory;
+    IFactory public factory;
     
     /// @notice Asset token used for all trading pairs
     address public assetToken;
@@ -82,7 +82,7 @@ contract Router is
         require(maxTxPercent_ > 0, "Invalid max tx percent");
         require(maxTxPercent_ <= 100_000, "Max tx percent Exceeds 100%");
 
-        factory = Factory(factory_);
+        factory = IFactory(factory_);
         assetToken = assetToken_;
         maxTxPercent = maxTxPercent_;
     }
@@ -108,7 +108,7 @@ contract Router is
         require(amountIn_ > 0, "Invalid amount");
         
         // Check token hasn't graduated
-        Token token = Token(tokenAddress_);
+        IToken token = IToken(tokenAddress_);
         require(!token.hasGraduated(), "Token graduated");
 
         address pair = factory.getPair(tokenAddress_, assetToken);
@@ -163,7 +163,7 @@ contract Router is
         require(amountIn_ <= maxTxAmount, "Exceeds max transaction");
         
         // Check token hasn't graduated
-        Token token = Token(tokenAddress_);
+        IToken token = IToken(tokenAddress_);
         require(!token.hasGraduated(), "Token graduated");
 
         address pairAddress = factory.getPair(tokenAddress_, assetToken);
@@ -223,7 +223,7 @@ contract Router is
     ) external onlyRole(EXECUTOR_ROLE) nonReentrant {
         require(tokenAddress_ != address(0), "Invalid token");
         
-        Token token = Token(tokenAddress_);
+        IToken token = IToken(tokenAddress_);
         require(!token.hasGraduated(), "Token graduated");
         
         address pair = factory.getPair(tokenAddress_, assetToken);

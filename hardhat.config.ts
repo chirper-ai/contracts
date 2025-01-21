@@ -1,4 +1,7 @@
+
+// imports
 import { HardhatUserConfig } from "hardhat/config";
+import "hardhat-contract-sizer";
 import "@nomiclabs/hardhat-waffle";
 import "@nomiclabs/hardhat-ethers";
 import "@openzeppelin/hardhat-upgrades";
@@ -12,9 +15,8 @@ const config: HardhatUserConfig = {
     settings: {
       optimizer: {
         enabled: true,
-        runs: 200
+        runs: 200,
       },
-      evmVersion: "paris",
       viaIR: true,
     },
   },
