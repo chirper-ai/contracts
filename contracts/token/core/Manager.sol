@@ -2,31 +2,15 @@
 pragma solidity ^0.8.22;
 
 // openzeppelin
-import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
-// uniswap v2
-import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
-import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
-
-// uniswap v3 simplified
-import "../interfaces/UniswapV3/IUniswapV3Pool.sol";
-import "../interfaces/UniswapV3/IUniswapV3Factory.sol";
-import "../interfaces/UniswapV3/INonfungiblePositionManager.sol";
-
-// velodrome simplified
-import "../interfaces/Velodrome/IVelodromeRouter.sol";
-import "../interfaces/Velodrome/IVelodromeFactory.sol";
-
 // locals
-import "../interfaces/IFactory.sol";
-import "../interfaces/IRouter.sol";
 import "./Token.sol";
-
-// interfaces
+import "../interfaces/IRouter.sol";
+import "../interfaces/IFactory.sol";
 import "../interfaces/IBondingPair.sol";
 
 /**
@@ -40,17 +24,6 @@ contract Manager is
     OwnableUpgradeable
 {
     using SafeERC20 for IERC20;
-
-    /*//////////////////////////////////////////////////////////////
-                                 ENUMS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Enum to specify the type of DEX router
-    enum RouterType {
-        UniswapV2,
-        UniswapV3,
-        Velodrome
-    }
 
     /*//////////////////////////////////////////////////////////////
                                  CONSTANTS
@@ -81,14 +54,6 @@ contract Manager is
     /*//////////////////////////////////////////////////////////////
                                   STRUCTS
     //////////////////////////////////////////////////////////////*/
-
-    /// @notice Router information for token graduation
-    struct DexRouter {
-        address routerAddress; // Address of the DEX router
-        uint24 feeAmount;     // Fee amount for the DEX router
-        uint24 weight;        // Weight for liquidity distribution (1-100)
-        RouterType routerType; // Type of DEX router (UniswapV2 or UniswapV3)
-    }
 
     /**
      * @notice Comprehensive metrics tracking for an agent token
@@ -136,7 +101,7 @@ contract Manager is
         TokenMetrics metrics;
         bool hasGraduated;
         address bondingPair;
-        DexRouter[] dexRouters;
+        IRouter.DexRouter[] dexRouters;
         address[] dexPools;
     }
 
@@ -244,7 +209,7 @@ contract Manager is
         string calldata intention_,
         string calldata url_,
         uint256 initBuy_,
-        DexRouter[] calldata dexRouters_
+        IRouter.DexRouter[] calldata dexRouters_
     ) external nonReentrant returns (address token, address pair, uint256 index) {
         // Validate DEX router configuration
         require(dexRouters_.length > 0, "Must provide at least one DEX router");
@@ -359,43 +324,84 @@ contract Manager is
     }
 
     /**
-     * @notice Executes a buy order for agent tokens
-     * @param amountIn_ Amount of asset tokens to spend
-     * @param tokenAddress_ Address of token to buy
-     * @return success Whether the operation succeeded
+     * @notice Executes a buy order for agent tokens with automated graduation checking
+     * @dev This function handles the entire buy process including:
+     *      1. Token purchase through router
+     *      2. Reserve metrics update
+     *      3. Graduation threshold checking
+     *      4. Automatic graduation triggering if threshold is met
+     * 
+     * The function will revert if:
+     * - The token has already graduated
+     * - The token's total supply is 0
+     * - The router's buy operation fails
+     * 
+     * @param amountIn_ Amount of asset tokens to spend on the purchase
+     * @param tokenAddress_ Address of the agent token to buy
+     * @return success True if the buy operation and all subsequent operations succeed
+     * 
+     * @custom:metrics Updates token metrics via _updateMetrics()
+     * @custom:graduation May trigger token graduation via _graduate() if reserve ratio hits threshold
+     * @custom:requires
+     * - Token must not be graduated
+     * - Valid pair must exist in factory
+     * - Token must have non-zero total supply
+     * - Router must have sufficient approval for asset tokens
+     * - Caller must have sufficient asset tokens
      */
     function buy(
         uint256 amountIn_,
         address tokenAddress_
     ) external payable returns (bool) {
+        // Check if token is eligible for trading by verifying it hasn't graduated
+        // This prevents trading after graduation when tokens move to external DEXes
         require(!agentTokens[tokenAddress_].hasGraduated, "Trading not active");
 
+        // Get the bonding pair address from the factory
+        // This pair manages the token/asset liquidity pool
         address pairAddress = factory.getPair(
             tokenAddress_,
             router.assetToken()
         );
 
+        // Load the bonding pair contract and get current reserves
+        // reserveA represents the agent token balance
+        // We ignore reserveB (asset token) since we only need agent token reserves
         IBondingPair pair = IBondingPair(pairAddress);
         (uint256 reserveA,) = pair.getReserves();
 
+        // Execute the buy through the router
+        // amount0Out represents the amount of agent tokens the user receives
+        // First return value (amountIn) is ignored since we already have it
         (,uint256 amount0Out) = router.buy(
             amountIn_,
             tokenAddress_,
             msg.sender
         );
 
+        // Calculate new reserve after tokens are removed from the pool
+        // This represents remaining agent token liquidity after the trade
         uint256 newReserveA = reserveA - amount0Out;
 
+        // Update metrics with new reserve values
+        // This tracks various token metrics for analysis and graduation criteria
         _updateMetrics(
             tokenAddress_,
             newReserveA
         );
 
+        // Get total token supply for calculating reserve percentage
+        // This is used to determine if graduation threshold is met
         uint256 totalSupply = IERC20(tokenAddress_).totalSupply();
         require(totalSupply > 0, "Invalid total supply");
 
+        // Calculate what percentage of total supply remains in reserves
+        // Multiply by 100_000 for precision (100% = 100_000)
+        // This ratio determines if token is ready for graduation
         uint256 reservePercentage = (newReserveA * 100_000) / totalSupply;
         
+        // If reserve percentage falls below graduation threshold
+        // trigger graduation process to move token to external DEXes
         if (reservePercentage <= gradThreshold) {
             _graduate(tokenAddress_);
         }
@@ -405,30 +411,64 @@ contract Manager is
 
     /**
      * @notice Executes a sell order for agent tokens
-     * @param amountIn_ Amount of tokens to sell
-     * @param tokenAddress_ Address of token to sell
-     * @return success Whether the operation succeeded
+     * @dev This function handles the sell process including:
+     *      1. Token sale through router
+     *      2. Reserve metrics update
+     *      
+     * Unlike buy operations, sell operations do not trigger graduation
+     * since they increase reserves rather than decrease them.
+     * 
+     * The function will revert if:
+     * - The token has already graduated
+     * - The router's sell operation fails
+     * - The caller has insufficient token balance
+     * - The caller has not approved sufficient tokens to the router
+     * 
+     * @param amountIn_ Amount of agent tokens to sell
+     * @param tokenAddress_ Address of the agent token being sold
+     * @return success True if the sell operation and all subsequent operations succeed
+     * 
+     * @custom:metrics Updates token metrics via _updateMetrics()
+     * @custom:requires
+     * - Token must not be graduated
+     * - Valid pair must exist in factory
+     * - Caller must have sufficient token balance
+     * - Router must have sufficient token approval
      */
     function sell(
         uint256 amountIn_,
         address tokenAddress_
     ) external returns (bool) {
+        // Check if token is eligible for trading by verifying it hasn't graduated
+        // This prevents trading after graduation when tokens move to external DEXes
         require(!agentTokens[tokenAddress_].hasGraduated, "Trading not active");
 
+        // Get the bonding pair address from the factory
+        // This pair manages the token/asset liquidity pool
         address pairAddress = factory.getPair(
             tokenAddress_,
             router.assetToken()
         );
 
+        // Load the bonding pair contract and get current reserves
+        // reserveA represents the agent token balance
+        // We ignore reserveB (asset token) since we only need agent token reserves
         IBondingPair pair = IBondingPair(pairAddress);
         (uint256 reserveA,) = pair.getReserves();
         
+        // Execute the sell through the router
+        // amount0In represents the amount of agent tokens being sold into the pool
+        // Second return value (amountOut - asset tokens received) is ignored 
+        // as it's handled by the router
         (uint256 amount0In,) = router.sell(
             amountIn_,
             tokenAddress_,
             msg.sender
         );
 
+        // Update metrics with new reserve values
+        // For sells, we add the incoming tokens to the reserves
+        // This increases the pool's agent token balance
         _updateMetrics(
             tokenAddress_,
             reserveA + amount0In
@@ -503,287 +543,22 @@ contract Manager is
     function _graduate(address tokenAddress_) private {
         TokenData storage token = agentTokens[tokenAddress_];
         require(!token.hasGraduated, "Invalid graduation state");
-
-        // Extract liquidity from bonding curve
-        (uint256 tokenBalance, uint256 assetBalance) = _extractBondingCurveLiquidity(tokenAddress_);
         
         // Deploy to DEXes and store the pairs
-        address[] memory newPairs = _deployToDexes(
+        address[] memory newPairs = router.graduate(
             tokenAddress_,
-            token.dexRouters,
-            tokenBalance,
-            assetBalance
+            token.dexRouters
         );
 
         // Update token data with new pairs
         token.dexPools = newPairs;
         token.hasGraduated = true;
 
-        emit Graduated(tokenAddress_);
-    }
-
-    /**
-     * @notice Extracts liquidity from the bonding curve pair
-     * @param tokenAddress_ Address of the token
-     * @return tokenBalance Amount of tokens extracted
-     * @return assetBalance Amount of asset tokens extracted
-     */
-    function _extractBondingCurveLiquidity(
-        address tokenAddress_
-    ) private returns (uint256 tokenBalance, uint256 assetBalance) {
-        TokenData storage token = agentTokens[tokenAddress_];
-        address assetTokenAddr = router.assetToken();
-
-        IBondingPair pair = IBondingPair(token.bondingPair);
-        tokenBalance = pair.balance();
-        assetBalance = pair.assetBalance();
-        require(tokenBalance > 0 && assetBalance > 0, "No liquidity to graduate");
-
-        // Note: This now just extracts liquidity, graduation happens later
-        router.graduate(tokenAddress_);
-
-        require(
-            IERC20(tokenAddress_).balanceOf(address(this)) >= tokenBalance &&
-            IERC20(assetTokenAddr).balanceOf(address(this)) >= assetBalance,
-            "Failed to receive tokens"
-        );
-
-        return (tokenBalance, assetBalance);
-    }
-
-    /**
-     * @notice Deploys liquidity to multiple DEXes according to weights
-     * @param tokenAddress_ Address of the token
-     * @param dexRouters_ Array of DEX routers and their weights
-     * @param totalTokens_ Total tokens to distribute
-     * @param totalAssets_ Total asset tokens to distribute
-     * @return pairs Array of created DEX pairs
-     */
-    function _deployToDexes(
-        address tokenAddress_,
-        DexRouter[] memory dexRouters_,
-        uint256 totalTokens_,
-        uint256 totalAssets_
-    ) private returns (address[] memory pairs) {
-        uint256 length = dexRouters_.length;
-        address[] memory newPairs = new address[](length);
-
-        uint256 denominator = 100_000;  // Reduce repeated division operations
-
-        for (uint256 i = 0; i < length; ++i) {
-            DexRouter memory dexRouter = dexRouters_[i];  // Cache the struct in memory
-
-            uint256 tokenAmount = (totalTokens_ * dexRouter.weight) / denominator;
-            uint256 assetAmount = (totalAssets_ * dexRouter.weight) / denominator;
-
-            if (dexRouter.routerType == RouterType.UniswapV2) {
-                newPairs[i] = _deployUniV2(tokenAddress_, dexRouter.routerAddress, tokenAmount, assetAmount);
-            } else if (dexRouter.routerType == RouterType.UniswapV3) {
-                newPairs[i] = _deployUniV3(tokenAddress_, dexRouter.routerAddress, tokenAmount, assetAmount, dexRouter.feeAmount);
-            } else {
-                // Assuming Velodrome is the only remaining option
-                newPairs[i] = _deployVelo(tokenAddress_, dexRouter.routerAddress, tokenAmount, assetAmount);
-            }
-        }
-
+        // graduate token
         Token(tokenAddress_).graduate(newPairs);
-        return newPairs;
-    }
 
-    /**
-     * @notice Deploys liquidity to a Uniswap V2 pool
-     * @param tokenAddress_ Address of the token
-     * @param routerAddress_ Address of the Uniswap V2 router
-     * @param tokenAmount_ Amount of tokens to provide as liquidity
-     * @param assetAmount_ Amount of asset tokens to provide as liquidity
-     * @return dexPool Address of the created or existing DEX pool
-     */
-    function _deployUniV2(
-        address tokenAddress_,
-        address routerAddress_,
-        uint256 tokenAmount_,
-        uint256 assetAmount_
-    ) private returns (address dexPool) {
-        address assetTokenAddr = router.assetToken();
-        IUniswapV2Router02 dexRouter = IUniswapV2Router02(routerAddress_);
-        IUniswapV2Factory dexFactory = IUniswapV2Factory(dexRouter.factory());
-
-        IERC20 token = IERC20(tokenAddress_);
-        IERC20 assetToken = IERC20(assetTokenAddr);
-
-        // Approve tokens for router in a single step
-        token.forceApprove(address(dexRouter), tokenAmount_);
-        assetToken.forceApprove(address(dexRouter), assetAmount_);
-
-        // Check if the pair exists, if not create it
-        dexPool = dexFactory.getPair(tokenAddress_, assetTokenAddr);
-        if (dexPool == address(0)) {
-            dexPool = dexFactory.createPair(tokenAddress_, assetTokenAddr);
-        }
-
-        // Precompute slippage tolerance values (95% of provided amount)
-        uint256 minTokenAmount = (tokenAmount_ * 95) / 100;
-        uint256 minAssetAmount = (assetAmount_ * 95) / 100;
-
-        // Add liquidity with calculated minimums
-        dexRouter.addLiquidity(
-            tokenAddress_,
-            assetTokenAddr,
-            tokenAmount_,
-            assetAmount_,
-            minTokenAmount,
-            minAssetAmount,
-            address(0),
-            block.timestamp + 3600
-        );
-
-        return dexPool;
-    }
-
-
-    /**
-     * @notice Deploys liquidity to a Uniswap V3 pool with full range coverage
-     * @dev This function handles both pool creation and initial liquidity provision.
-     * It ensures full-range market making (-887220 to +887220 ticks) while properly
-     * setting the initial pool price based on the token ratio.
-     * 
-     * Key steps:
-     * 1. Sort tokens (V3 requires token0 < token1)
-     * 2. Create pool if it doesn't exist
-     * 3. Initialize pool with correct price if new
-     * 4. Create full-range position
-     *
-     * Technical notes:
-     * - sqrtPriceX96 is in Q64.96 format
-     * - Assumes amounts provided are already correctly proportioned
-     * - Sets minimum amounts to 1 to allow maximum slippage
-     *
-     * @param tokenAddress_ Address of the token being graduated
-     * @param routerAddress_ Address of the Uniswap V3 NonfungiblePositionManager
-     * @param tokenAmount_ Amount of tokens to provide as liquidity
-     * @param assetAmount_ Amount of asset tokens to provide as liquidity
-     * @param feeAmount_ Fee tier for the pool (500 = 0.05%, 3000 = 0.3%, 10000 = 1%)
-     * @return dexPool Address of the created/existing V3 pool
-     */
-    function _deployUniV3(
-        address tokenAddress_,
-        address routerAddress_,
-        uint256 tokenAmount_,
-        uint256 assetAmount_,
-        uint24 feeAmount_
-    ) private returns (address dexPool) {
-        address assetTokenAddr = router.assetToken();
-        
-        // Sort tokens according to V3 requirements (token0 < token1)
-        bool isTokenFirst = tokenAddress_ < assetTokenAddr;
-        (address token0, address token1) = isTokenFirst 
-            ? (tokenAddress_, assetTokenAddr) 
-            : (assetTokenAddr, tokenAddress_);
-            
-        (uint256 amount0, uint256 amount1) = isTokenFirst
-            ? (tokenAmount_, assetAmount_)
-            : (assetAmount_, tokenAmount_);
-
-        // Get position manager and factory
-        INonfungiblePositionManager positionManager = INonfungiblePositionManager(routerAddress_);
-        IUniswapV3Factory positionFactory = IUniswapV3Factory(positionManager.factory());
-
-        // Get or create pool
-        dexPool = positionFactory.getPool(token0, token1, feeAmount_);
-        if (dexPool == address(0)) {
-            dexPool = positionFactory.createPool(token0, token1, feeAmount_);
-
-            // Calculate initial sqrt price and initialize pool
-            uint256 price = (amount1 * 1e18) / amount0;
-            uint256 sqrtPrice = Math.sqrt(price * 1e18);
-            uint160 sqrtPriceX96 = uint160((sqrtPrice * (2**96)) / 1e18);
-            IUniswapV3Pool(dexPool).initialize(sqrtPriceX96);
-        }
-
-        // Approve position manager to spend tokens
-        IERC20(token0).forceApprove(address(positionManager), amount0);
-        IERC20(token1).forceApprove(address(positionManager), amount1);
-
-        // Calculate full range ticks
-        int24 tickSpacing = IUniswapV3Pool(dexPool).tickSpacing();
-        int24 tickLower = (-887272 / tickSpacing) * tickSpacing;
-        int24 tickUpper = (887272 / tickSpacing) * tickSpacing;
-
-        // Create the full range position
-        positionManager.mint(INonfungiblePositionManager.MintParams({
-            token0: token0,
-            token1: token1,
-            fee: feeAmount_,
-            tickLower: tickLower,
-            tickUpper: tickUpper,
-            amount0Desired: amount0,
-            amount1Desired: amount1,
-            amount0Min: 0,
-            amount1Min: 0,
-            recipient: address(this),
-            deadline: block.timestamp + 3600
-        }));
-
-        return dexPool;
-    }
-
-    /**
-     * @notice Deploys liquidity to a Velodrome pool
-     * @dev Velodrome is similar to Uniswap V2 but with stable/volatile pool options
-     * We default to volatile pools for AI tokens
-     * @param tokenAddress_ Address of the token
-     * @param routerAddress_ Address of the Velodrome router
-     * @param tokenAmount_ Amount of tokens to provide as liquidity
-     * @param assetAmount_ Amount of asset tokens to provide as liquidity
-     * @return dexPool Address of the created or existing Velodrome pool
-     */
-    function _deployVelo(
-        address tokenAddress_,
-        address routerAddress_,
-        uint256 tokenAmount_,
-        uint256 assetAmount_
-    ) private returns (address dexPool) {
-        address assetTokenAddr = router.assetToken();
-        IVelodromeRouter veloRouter = IVelodromeRouter(routerAddress_);
-        
-        // Approve Velodrome router to spend tokens
-        IERC20(tokenAddress_).forceApprove(address(veloRouter), tokenAmount_);
-        IERC20(assetTokenAddr).forceApprove(address(veloRouter), assetAmount_);
-
-        // Get factory and check for existing pair
-        address veloFactory = veloRouter.factory();
-        bool isStable = false; // We use volatile pools for AI tokens
-        
-        dexPool = IVelodromeFactory(veloFactory).getPair(
-            tokenAddress_,
-            assetTokenAddr,
-            isStable
-        );
-
-        // Create pair if it doesn't exist
-        if (dexPool == address(0)) {
-            dexPool = IVelodromeFactory(veloFactory).createPair(
-                tokenAddress_,
-                assetTokenAddr,
-                isStable
-            );
-        }
-
-        // Add liquidity to the pool
-        veloRouter.addLiquidity(
-            tokenAddress_,
-            assetTokenAddr,
-            isStable,
-            tokenAmount_,
-            assetAmount_,
-            tokenAmount_ * 95 / 100,  // 5% slippage tolerance
-            assetAmount_ * 95 / 100,
-            address(0),
-            block.timestamp + 3600
-        );
-            
-
-        return dexPool;
+        // graduated
+        emit Graduated(tokenAddress_);
     }
 
     /*//////////////////////////////////////////////////////////////
