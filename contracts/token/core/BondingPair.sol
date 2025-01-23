@@ -1,223 +1,373 @@
 // SPDX-License-Identifier: MIT
-// Created by chirper.build
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-import "../interfaces/IBondingPair.sol";
+import "../interfaces/IRouter.sol";
 
 /**
- * @title Pair
- * @dev Manages liquidity pairs for the chirper.build platform
+ * @title BondingPair
+ * @dev Implements a bonding curve automated market maker for agent tokens.
+ * 
+ * The bonding curve uses the formula: price = K / supply
+ * Where:
+ * - K is a constant that determines curve steepness
+ * - supply is the current token supply in the pair
+ * 
+ * Key mechanics:
+ * 1. Price increases as supply decreases (buying)
+ * 2. Price decreases as supply increases (selling)
+ * 3. Asset token reserves are determined by assetRate
+ * 4. Graduation threshold triggers when reserve ratio hits target
+ * 
+ * Example:
+ * - K = 1e18, supply = 1e6 tokens
+ * - Initial price = 1e18 / 1e6 = 1e12 asset tokens per token
+ * - After buying 1e5 tokens:
+ *   New price = 1e18 / 9e5 ≈ 1.11e12 (11% increase)
  */
-contract BondingPair is IBondingPair, ReentrancyGuard {
+contract BondingPair is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    /// @notice Router contract address
+    /*//////////////////////////////////////////////////////////////
+                                CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Basis points denominator for percentage calculations (100%)
+    uint256 private constant BASIS_POINTS = 100_000;
+
+    /// @notice Minimum amount for token operations to prevent dust
+    uint256 private constant MINIMUM_AMOUNT = 1000;
+
+    /// @notice Reserve ratio below which graduation is triggered
+    uint256 private constant GRADUATION_THRESHOLD = 20_000; // 20%
+
+    /*//////////////////////////////////////////////////////////////
+                            STATE VARIABLES
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice The bonding curve constant K
+    uint256 public immutable K;
+
+    /// @notice The asset token rate in basis points
+    uint64 public immutable assetRate;
+
+    /// @notice The factory that created this pair
+    address public immutable factory;
+
+    /// @notice The router contract that handles trading
     address public immutable router;
-    
-    /// @notice First token in the pair (Agent token)
+
+    /// @notice The agent token in the pair
     address public immutable agentToken;
-    
-    /// @notice Second token in the pair (Asset token)
+
+    /// @notice The asset token in the pair (e.g., USDC)
     address public immutable assetToken;
 
+    /// @notice Reserve of agent tokens
+    uint256 private reserveAgent;
+
+    /// @notice Reserve of asset tokens
+    uint256 private reserveAsset;
+
+    /// @notice Flag indicating if graduation threshold has been met
+    bool public isGraduated;
+
+    /// @notice Block timestamp of last swap
+    uint32 private blockTimestampLast;
+
+    /*//////////////////////////////////////////////////////////////
+                                 EVENTS
+    //////////////////////////////////////////////////////////////*/
+
     /**
-     * @notice Pool state for the liquidity pair
-     * @dev Stores the current reserves and constant product
+     * @notice Emitted when reserves are updated
+     * @param reserveAgent New agent token reserve
+     * @param reserveAsset New asset token reserve
      */
-    struct Pool {
-        uint256 reserveAgent;   // Reserve of the agent token
-        uint256 reserveAsset;   // Reserve of the asset token
-        uint256 k;              // Constant product (k = x * y)
-        uint256 lastUpdate;     // Last update timestamp
-    }
+    event ReservesUpdated(uint256 reserveAgent, uint256 reserveAsset);
 
-    /// @notice Current pool state
-    Pool private pool;
+    /**
+     * @notice Emitted when graduation threshold is met
+     * @param reserveRatio Final reserve ratio at graduation
+     */
+    event GraduationTriggered(uint256 reserveRatio);
 
-    /// @notice Emitted on initial liquidity provision
-    event Mint(uint256 agentAmount, uint256 assetAmount);
-
-    /// @notice Emitted on swap operations
+    /**
+     * @notice Emitted when tokens are swapped
+     * @param sender Address initiating the swap
+     * @param agentAmountIn Amount of agent tokens in (if selling)
+     * @param assetAmountIn Amount of asset tokens in (if buying)
+     * @param agentAmountOut Amount of agent tokens out (if buying)
+     * @param assetAmountOut Amount of asset tokens out (if selling)
+     */
     event Swap(
+        address indexed sender,
         uint256 agentAmountIn,
-        uint256 agentAmountOut,
         uint256 assetAmountIn,
+        uint256 agentAmountOut,
         uint256 assetAmountOut
     );
 
-    /**
-     * @notice Creates a new pair
-     * @param routerAddress Address of the router contract
-     * @param agentTokenAddress Address of the agent token
-     * @param assetTokenAddress Address of the asset token
-     */
-    constructor(
-        address routerAddress,
-        address agentTokenAddress,
-        address assetTokenAddress
-    ) {
-        require(routerAddress != address(0), "Invalid router");
-        require(agentTokenAddress != address(0), "Invalid agent token");
-        require(assetTokenAddress != address(0), "Invalid asset token");
+    /*//////////////////////////////////////////////////////////////
+                                MODIFIERS
+    //////////////////////////////////////////////////////////////*/
 
-        router = routerAddress;
-        agentToken = agentTokenAddress;
-        assetToken = assetTokenAddress;
-    }
-
-    /**
-     * @notice Restricts function to router only
-     */
+    /// @notice Ensures caller is the router contract
     modifier onlyRouter() {
-        require(router == msg.sender, "Router only");
+        require(msg.sender == router, "Only router");
         _;
     }
 
+    /*//////////////////////////////////////////////////////////////
+                              CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
+
     /**
-     * @notice Initializes the pool with initial liquidity
-     * @param agentAmount Amount of agent tokens
-     * @param assetAmount Amount of asset tokens
-     * @return Success boolean
+     * @notice Creates a new bonding pair
+     * @param router_ Router contract address
+     * @param agentToken_ Agent token address
+     * @param assetToken_ Asset token address
+     * @param k_ Bonding curve constant
+     * @param assetRate_ Required asset token rate
      */
-    function mint(
-        uint256 agentAmount,
-        uint256 assetAmount
-    ) external onlyRouter returns (bool) {
-        require(pool.lastUpdate == 0, "Already initialized");
+    constructor(
+        address router_,
+        address agentToken_,
+        address assetToken_,
+        uint256 k_,
+        uint64 assetRate_
+    ) {
+        require(router_ != address(0), "Invalid router");
+        require(agentToken_ != address(0), "Invalid agent token");
+        require(assetToken_ != address(0), "Invalid asset token");
+        require(k_ > 0, "Invalid K");
+        require(assetRate_ > 0 && assetRate_ <= BASIS_POINTS, "Invalid asset rate");
 
-        pool = Pool({
-            reserveAgent: agentAmount,
-            reserveAsset: assetAmount,
-            k: agentAmount * assetAmount,
-            lastUpdate: block.timestamp
-        });
-
-        emit Mint(agentAmount, assetAmount);
-        return true;
+        factory = msg.sender;
+        router = router_;
+        agentToken = agentToken_;
+        assetToken = assetToken_;
+        K = k_;
+        assetRate = assetRate_;
     }
 
+    /*//////////////////////////////////////////////////////////////
+                            TRADING FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
     /**
-     * @notice Executes a swap between the pair tokens
-     * @param agentAmountIn Amount of agent tokens being added
-     * @param agentAmountOut Amount of agent tokens being removed
-     * @param assetAmountIn Amount of asset tokens being added
-     * @param assetAmountOut Amount of asset tokens being removed
-     * @return Success boolean
+     * @notice Executes a swap according to bonding curve formula
+     * @dev Called by Router to execute trades
+     * Can be either:
+     * 1. Asset tokens in -> Agent tokens out (buying)
+     * 2. Agent tokens in -> Asset tokens out (selling)
+     * @param agentAmountIn Amount of agent tokens being sold
+     * @param assetAmountIn Amount of asset tokens being spent
+     * @param agentAmountOut Minimum agent tokens to receive
+     * @param assetAmountOut Minimum asset tokens to receive
      */
     function swap(
         uint256 agentAmountIn,
-        uint256 agentAmountOut,
         uint256 assetAmountIn,
+        uint256 agentAmountOut,
         uint256 assetAmountOut
-    ) external onlyRouter returns (bool) {
-        uint256 newReserveAgent = (pool.reserveAgent + agentAmountIn) - agentAmountOut;
-        uint256 newReserveAsset = (pool.reserveAsset + assetAmountIn) - assetAmountOut;
+    ) external nonReentrant onlyRouter {
+        require(!isGraduated, "Already graduated");
+        require(
+            (agentAmountIn > 0 && assetAmountOut > 0) || 
+            (assetAmountIn > 0 && agentAmountOut > 0),
+            "Invalid amounts"
+        );
 
-        pool = Pool({
-            reserveAgent: newReserveAgent,
-            reserveAsset: newReserveAsset,
-            k: pool.k,
-            lastUpdate: block.timestamp
-        });
+        // Calculate amounts based on bonding curve
+        if (agentAmountIn > 0) {
+            // Selling agent tokens
+            uint256 actualAssetOut = _getAssetAmountOut(agentAmountIn);
+            require(actualAssetOut >= assetAmountOut, "Insufficient output");
+            _updateReserves(
+                reserveAgent + agentAmountIn,
+                reserveAsset - actualAssetOut
+            );
+            assetAmountOut = actualAssetOut;
+            agentAmountOut = 0;
+        } else {
+            // Buying agent tokens
+            uint256 actualAgentOut = _getAgentAmountOut(assetAmountIn);
+            require(actualAgentOut >= agentAmountOut, "Insufficient output");
+            _updateReserves(
+                reserveAgent - actualAgentOut,
+                reserveAsset + assetAmountIn
+            );
+            agentAmountOut = actualAgentOut;
+            assetAmountOut = 0;
+        }
 
-        emit Swap(agentAmountIn, agentAmountOut, assetAmountIn, assetAmountOut);
-        return true;
+        emit Swap(
+            msg.sender,
+            agentAmountIn,
+            assetAmountIn,
+            agentAmountOut,
+            assetAmountOut
+        );
+
+        // Check graduation threshold
+        uint256 reserveRatio = (reserveAgent * BASIS_POINTS) / IERC20(agentToken).totalSupply();
+        if (reserveRatio <= GRADUATION_THRESHOLD) {
+            isGraduated = true;
+            emit GraduationTriggered(reserveRatio);
+            revert("GraduationRequired");
+        }
     }
 
     /**
-     * @notice Approves token spending
+     * @notice Transfers tokens from the pair
+     * @param to Address to transfer to
+     * @param amount Amount to transfer
+     */
+    function transferTo(
+        address to,
+        uint256 amount
+    ) external nonReentrant onlyRouter {
+        IERC20(agentToken).safeTransfer(to, amount);
+    }
+
+    /**
+     * @notice Transfers asset tokens from the pair
+     * @param to Address to transfer to
+     * @param amount Amount to transfer
+     */
+    function transferAsset(
+        address to,
+        uint256 amount
+    ) external nonReentrant onlyRouter {
+        IERC20(assetToken).safeTransfer(to, amount);
+    }
+
+    /**
+     * @notice Approves router to spend tokens
      * @param spender Address to approve
      * @param token Token to approve
      * @param amount Amount to approve
-     * @return Success boolean
      */
     function approval(
         address spender,
         address token,
         uint256 amount
-    ) external onlyRouter returns (bool) {
-        require(spender != address(0), "Invalid spender");
-        require(token != address(0), "Invalid token");
-
-        IERC20(token).forceApprove(spender, amount);
-        return true;
+    ) external nonReentrant onlyRouter {
+        require(
+            token == agentToken || token == assetToken,
+            "Invalid token"
+        );
+        IERC20(token).safeApprove(spender, amount);
     }
 
+    /*//////////////////////////////////////////////////////////////
+                            VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
     /**
-     * @notice Transfers asset tokens
-     * @param recipient Recipient address
-     * @param amount Amount to transfer
+     * @notice Returns current reserves
+     * @return Agent token reserve
+     * @return Asset token reserve
+     * @return Last update timestamp
      */
-    function transferAsset(
-        address recipient,
-        uint256 amount
-    ) external onlyRouter {
-        require(recipient != address(0), "Invalid recipient");
-        IERC20(assetToken).safeTransfer(recipient, amount);
+    function getReserves() external view returns (
+        uint256,
+        uint256,
+        uint32
+    ) {
+        return (reserveAgent, reserveAsset, blockTimestampLast);
     }
 
     /**
-     * @notice Transfers agent tokens
-     * @param recipient Recipient address
-     * @param amount Amount to transfer
-     */
-    function transferTo(
-        address recipient,
-        uint256 amount
-    ) external onlyRouter {
-        require(recipient != address(0), "Invalid recipient");
-        IERC20(agentToken).safeTransfer(recipient, amount);
-    }
-
-    /**
-     * @notice Gets current reserves
-     * @return Agent token reserve and asset token reserve
-     */
-    function getReserves() external view returns (uint256, uint256) {
-        return (pool.reserveAgent, pool.reserveAsset);
-    }
-
-    /**
-     * @notice Gets constant product value
-     * @return k value
-     */
-    function kLast() external view returns (uint256) {
-        return pool.k;
-    }
-
-    /**
-     * @notice Gets agent token price in terms of asset token
-     * @return Price ratio
-     */
-    function agentPrice() external view returns (uint256) {
-        return pool.reserveAsset / pool.reserveAgent;
-    }
-
-    /**
-     * @notice Gets asset token price in terms of agent token
-     * @return Price ratio
-     */
-    function assetPrice() external view returns (uint256) {
-        return pool.reserveAgent / pool.reserveAsset;
-    }
-
-    /**
-     * @notice Gets agent token balance
-     * @return Balance amount
+     * @notice Returns amount of agent tokens held by pair
      */
     function balance() external view returns (uint256) {
         return IERC20(agentToken).balanceOf(address(this));
     }
 
     /**
-     * @notice Gets asset token balance
-     * @return Balance amount
+     * @notice Returns amount of asset tokens held by pair
      */
     function assetBalance() external view returns (uint256) {
         return IERC20(assetToken).balanceOf(address(this));
+    }
+
+    /**
+     * @notice Calculates output amount of agent tokens for given input of asset tokens
+     * @param assetAmountIn Amount of asset tokens to spend
+     * @return Amount of agent tokens received
+     */
+    function getAgentAmountOut(
+        uint256 assetAmountIn
+    ) external view returns (uint256) {
+        return _getAgentAmountOut(assetAmountIn);
+    }
+
+    /**
+     * @notice Calculates output amount of asset tokens for given input of agent tokens
+     * @param agentAmountIn Amount of agent tokens to sell
+     * @return Amount of asset tokens received
+     */
+    function getAssetAmountOut(
+        uint256 agentAmountIn
+    ) external view returns (uint256) {
+        return _getAssetAmountOut(agentAmountIn);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         INTERNAL FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Updates reserves and timestamp
+     * @param newReserveAgent New agent token reserve
+     * @param newReserveAsset New asset token reserve
+     */
+    function _updateReserves(
+        uint256 newReserveAgent,
+        uint256 newReserveAsset
+    ) private {
+        require(
+            newReserveAgent > MINIMUM_AMOUNT &&
+            newReserveAsset > MINIMUM_AMOUNT,
+            "Below minimum"
+        );
+
+        reserveAgent = newReserveAgent;
+        reserveAsset = newReserveAsset;
+        blockTimestampLast = uint32(block.timestamp);
+
+        emit ReservesUpdated(newReserveAgent, newReserveAsset);
+    }
+
+    /**
+     * @notice Calculates agent tokens received for asset tokens spent
+     * @param assetAmountIn Amount of asset tokens to spend
+     * @return Amount of agent tokens received
+     */
+    function _getAgentAmountOut(
+        uint256 assetAmountIn
+    ) private view returns (uint256) {
+        uint256 newReserveAsset = reserveAsset + assetAmountIn;
+        uint256 newReserveAgent = (K * BASIS_POINTS) / (assetRate * newReserveAsset);
+        return reserveAgent - newReserveAgent;
+    }
+
+    /**
+     * @notice Calculates asset tokens received for agent tokens spent
+     * @param agentAmountIn Amount of agent tokens to sell
+     * @return Amount of asset tokens received
+     */
+    function _getAssetAmountOut(
+        uint256 agentAmountIn
+    ) private view returns (uint256) {
+        uint256 newReserveAgent = reserveAgent + agentAmountIn;
+        uint256 newReserveAsset = (K * BASIS_POINTS) / (assetRate * newReserveAgent);
+        return reserveAsset - newReserveAsset;
     }
 }
