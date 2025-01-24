@@ -113,6 +113,9 @@ contract Manager is
     /// @notice Factory contract reference
     IFactory public factory;
 
+    /// @notice Tax vault address for liquidity deployment
+    address public taxVault;
+
     /// @notice Asset token used for trading
     address public assetToken;
 
@@ -180,12 +183,15 @@ contract Manager is
      * @param factory_ Factory contract address
      * @param assetToken_ Asset token address
      * @param gradSlippage_ Graduation slippage tolerance
+     * @param gradThreshold_ Graduation reserve ratio threshold
+     * @param taxVault_ Tax vault address
      */
     function initialize(
         address factory_,
         address assetToken_,
         uint256 gradSlippage_,
-        uint256 gradThreshold_
+        uint256 gradThreshold_,
+        address taxVault_
     ) external initializer {
         __AccessControl_init();
         __ReentrancyGuard_init();
@@ -204,6 +210,7 @@ contract Manager is
         assetToken = assetToken_;
         gradSlippage = gradSlippage_;
         gradThreshold = gradThreshold_;
+        taxVault = taxVault_;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -412,6 +419,16 @@ contract Manager is
         gradThreshold = gradThreshold_;
     }
 
+    /**
+     * @notice Sets the tax vault address for liquidity deployment
+     * @param taxVault_ Tax vault address
+     */
+    function setTaxVault(
+        address taxVault_
+    ) external onlyRole(ADMIN_ROLE) {
+        taxVault = taxVault_;
+    }
+
     /*//////////////////////////////////////////////////////////////
                          INTERNAL DEX FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -454,7 +471,7 @@ contract Manager is
             assetAmount,
             minTokenAmount,
             minAssetAmount,
-            address(0),
+            address(taxVault),
             block.timestamp
         );
 
@@ -477,8 +494,6 @@ contract Manager is
         uint256 assetAmount,
         uint24 fee
     ) internal returns (address pool) {
-        console.log("\n=== Starting V3 Deployment ===");
-        
         INonfungiblePositionManager posManager = INonfungiblePositionManager(routerAddress);
         IUniswapV3Factory v3Factory = IUniswapV3Factory(posManager.factory());
 
@@ -486,67 +501,31 @@ contract Manager is
         (address token0, address token1) = token < assetToken ? (token, assetToken) : (assetToken, token);
         (uint256 amount0, uint256 amount1) = token < assetToken ? (tokenAmount, assetAmount) : (assetAmount, tokenAmount);
 
-        console.log("Token ordering:");
-        console.log(" - token0:", token0);
-        console.log(" - token1:", token1);
-        console.log(" - amount0:", amount0);
-        console.log(" - amount1:", amount1);
-
         // Get or create pool
         pool = v3Factory.getPool(token0, token1, fee);
-        console.log("\nPool status:", pool != address(0) ? "exists" : "needs creation");
         
         if (pool == address(0)) {
-            console.log("\nCreating new pool...");
             pool = v3Factory.createPool(token0, token1, fee);
-            console.log("Pool created at:", pool);
 
             // Initialize pool
             uint256 price = (amount1 * 1e18) / amount0;
             uint256 sqrtPrice = Math.sqrt(price * 1e18);
             uint160 sqrtPriceX96 = uint160((sqrtPrice * (2**96)) / 1e18);
             
-            console.log("\nPool initialization:");
-            console.log(" - raw price:", price);
-            console.log(" - sqrt price:", sqrtPrice);
-            console.log(" - sqrtPriceX96:", sqrtPriceX96);
-            
             IUniswapV3Pool(pool).initialize(sqrtPriceX96);
-            console.log("Pool initialized successfully");
         }
-
-        // Get pool state
-        (uint160 currentSqrtPrice, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
-        console.log("\nCurrent pool state:");
-        console.log(" - sqrt price:", currentSqrtPrice);
-        console.log(" - tick:", uint24(currentTick));
-        console.log(" - liquidity:", IUniswapV3Pool(pool).liquidity());
 
         // Approve tokens
         IERC20(token0).forceApprove(address(posManager), amount0);
         IERC20(token1).forceApprove(address(posManager), amount1);
-
-        console.log("\nToken approvals and balances:");
-        console.log(" - token0 approved:", IERC20(token0).allowance(address(this), address(posManager)));
-        console.log(" - token1 approved:", IERC20(token1).allowance(address(this), address(posManager)));
-        console.log(" - token0 balance:", IERC20(token0).balanceOf(address(this)));
-        console.log(" - token1 balance:", IERC20(token1).balanceOf(address(this)));
 
         // Calculate ticks
         int24 tickSpacing = IUniswapV3Pool(pool).tickSpacing();
         int24 tickLower = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
         int24 tickUpper = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
 
-        console.log("\nPosition parameters:");
-        console.log(" - tick spacing:", uint24(tickSpacing));
-        console.log(" - tick lower:", uint24(tickLower * -1));
-        console.log(" - tick upper:", uint24(tickUpper));
-        console.log(" - amount0 min:", (amount0 * (BASIS_POINTS - gradSlippage)) / BASIS_POINTS);
-        console.log(" - amount1 min:", (amount1 * (BASIS_POINTS - gradSlippage)) / BASIS_POINTS);
-
         // Mint position
-        console.log("\nAttempting to mint position...");
-        try posManager.mint(
+        posManager.mint(
             INonfungiblePositionManager.MintParams({
                 token0: token0,
                 token1: token1,
@@ -557,20 +536,10 @@ contract Manager is
                 amount1Desired: amount1,
                 amount0Min: 0,
                 amount1Min: 0,
-                recipient: address(this),
+                recipient: address(taxVault),
                 deadline: block.timestamp + 3600
             })
-        ) returns (uint256 tokenId, uint128 liquidity, uint256 amount0Added, uint256 amount1Added) {
-            console.log("Mint succeeded:");
-            console.log(" - tokenId:", tokenId);
-            console.log(" - liquidity:", liquidity);
-            console.log(" - amount0:", amount0Added);
-            console.log(" - amount1:", amount1Added);
-        } catch (bytes memory reason) {
-            console.log("Mint failed! Error data:");
-            console.logBytes(reason);
-            revert("V3: Mint failed");
-        }
+        );
 
         return pool;
     }
@@ -616,7 +585,7 @@ contract Manager is
             assetAmount,
             minTokenAmount,
             minAssetAmount,
-            address(this),
+            address(taxVault),
             block.timestamp
         );
 

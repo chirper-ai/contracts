@@ -213,6 +213,7 @@ export async function deployFixture(): Promise<TestContext> {
     await assetToken.getAddress(),
     1_000, // graduation slippage
     20_000, // graduation threshold
+    await taxVault.getAddress(),
   ]);
 
   // Set manager and router in factory

@@ -132,9 +132,9 @@ describe("Manager", function () {
     });
 
     it("should deploy liquidity to Uniswap V3 correctly", async function () {
-      const { alice, router, owner, manager, assetToken, uniswapV3Router } = context;
+      const { alice, router, owner, manager, assetToken, nftPositionManager } = context;
       const dexConfigs = [{
-        router: await uniswapV3Router.getAddress(),
+        router: await nftPositionManager.getAddress(),
         fee: 3000,
         weight: 100_000,
         dexType: DexType.UniswapV3
@@ -178,12 +178,9 @@ describe("Manager", function () {
       const slot0 = await v3Pool.slot0();
       expect(slot0.sqrtPriceX96).to.be.gt(0);
       
-      // Verify position
-      const position = await v3Pool.positions(
-        // Get position key - needs to be implemented based on your setup
-        getPositionKey(await manager.getAddress(), TickMath.MIN_TICK, TickMath.MAX_TICK)
-      );
-      expect(position.liquidity).to.be.gt(0);
+      // check pool liquidity
+      const liquidity = await v3Pool.liquidity();
+      expect(liquidity).to.be.gt(0);
     });
 
     it("should handle multiple DEX deployments with correct weights", async function () {
@@ -196,7 +193,7 @@ describe("Manager", function () {
           dexType: DexType.UniswapV2
         },
         {
-          router: await context.uniswapV3Router.getAddress(),
+          router: await context.nftPositionManager.getAddress(),
           fee: 3000,
           weight: 50_000,
           dexType: DexType.UniswapV3
