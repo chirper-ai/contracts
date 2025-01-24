@@ -59,6 +59,8 @@ interface IFactory {
     function CREATOR_ROLE() external view returns (bytes32);
     
     function router() external view returns (address);
+
+    function manager() external view returns (address);
     
     function buyTax() external view returns (uint256);
     

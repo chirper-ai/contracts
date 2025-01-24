@@ -2,9 +2,9 @@
 // imports
 import { HardhatUserConfig } from "hardhat/config";
 import "hardhat-contract-sizer";
-import "@nomiclabs/hardhat-waffle";
 import "@nomiclabs/hardhat-ethers";
 import "@openzeppelin/hardhat-upgrades";
+import "@nomicfoundation/hardhat-chai-matchers";
 
 // Load environment variables
 require("dotenv").config();

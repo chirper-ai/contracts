@@ -45,6 +45,9 @@ importers:
         specifier: ^2.22.18
         version: 2.22.18(bufferutil@4.0.5)(ts-node@10.9.2(@types/node@22.10.5)(typescript@5.7.3))(typescript@5.7.3)(utf-8-validate@5.0.7)
     devDependencies:
+      '@nomicfoundation/hardhat-chai-matchers':
+        specifier: ^2.0.8
+        version: 2.0.8(@nomicfoundation/hardhat-ethers@3.0.8(ethers@6.13.5(bufferutil@4.0.5)(utf-8-validate@5.0.7))(hardhat@2.22.18(bufferutil@4.0.5)(ts-node@10.9.2(@types/node@22.10.5)(typescript@5.7.3))(typescript@5.7.3)(utf-8-validate@5.0.7)))(chai@4.3.7)(ethers@6.13.5(bufferutil@4.0.5)(utf-8-validate@5.0.7))(hardhat@2.22.18(bufferutil@4.0.5)(ts-node@10.9.2(@types/node@22.10.5)(typescript@5.7.3))(typescript@5.7.3)(utf-8-validate@5.0.7))
       '@nomicfoundation/hardhat-ethers':
         specifier: ^3.0.8
         version: 3.0.8(ethers@6.13.5(bufferutil@4.0.5)(utf-8-validate@5.0.7))(hardhat@2.22.18(bufferutil@4.0.5)(ts-node@10.9.2(@types/node@22.10.5)(typescript@5.7.3))(typescript@5.7.3)(utf-8-validate@5.0.7))

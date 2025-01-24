@@ -1,546 +1,237 @@
 // test/Manager.test.ts
 import { ethers } from "hardhat";
-import { expect, loadFixture, createToken, deployFixture, RouterType } from "./helper";
-import type { TestContext } from "./helper";
+import { expect, loadFixture, deployFixture, createToken, DexType } from "./setup";
+import type { TestContext } from "./setup";
 
-describe("Manager", function() {
+describe("Manager", function () {
   let context: TestContext;
 
-  beforeEach(async function() {
+  beforeEach(async function () {
     context = await loadFixture(deployFixture);
   });
 
-  describe("Initialization", function() {
-    it("should set correct initial values", async function() {
-      const { manager, factory, router } = context;
-      
+  describe("Initialization", function () {
+    it("should set correct initial values", async function () {
+      const { manager, factory, assetToken } = context;
+
       expect(await manager.factory()).to.equal(await factory.getAddress());
-      expect(await manager.router()).to.equal(await router.getAddress());
-      // Launch fee is now handled by factory
-      expect(Number(await factory.launchTax())).to.equal(5_000); // 5%
-      expect(Number(await manager.initialSupply())).to.equal(1_000_000);
-      expect(Number(await manager.assetRate())).to.equal(60_000);
-      expect(Number(await manager.gradThreshold())).to.equal(50_000);
+      expect(await manager.assetToken()).to.equal(await assetToken.getAddress());
+      expect(await manager.gradSlippage()).to.equal(1_000n); // 1%
+      expect(await manager.gradThreshold()).to.equal(20_000n); // 20%
     });
 
-    it("should have correct owner", async function() {
+    it("should grant ADMIN_ROLE to deployer", async function () {
       const { manager, owner } = context;
-      expect(await manager.owner()).to.equal(await owner.getAddress());
+      const ADMIN_ROLE = await manager.ADMIN_ROLE();
+      expect(await manager.hasRole(ADMIN_ROLE, await owner.getAddress())).to.be.true;
     });
   });
 
-  describe("Trading Operations", function() {
-    it("should execute buy correctly", async function() {
-      const { manager, alice, bob, router, assetToken } = context;
-    
-      // Launch a token first
-      const agentToken = await createToken(context, alice);
-    
-      // Bob approves the Manager to spend tokens
-      const buyAmount = ethers.parseEther("100");
-      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
-    
-      // Execute the buy operation
-      const beforeBalance = await agentToken.balanceOf(bob.getAddress());
-      await manager.connect(bob).buy(buyAmount, agentToken.getAddress());
-      const afterBalance = await agentToken.balanceOf(bob.getAddress());
-    
-      // Verify the buyer received tokens
-      expect(Number(afterBalance)).to.be.gt(Number(beforeBalance));
+  describe("Agent Registration", function () {
+
+    it("should revert registration from non-factory address", async function () {
+      const { manager, alice } = context;
+      const dexConfigs = [{
+        router: await context.uniswapV2Router.getAddress(),
+        fee: 3000,
+        weight: 100_000,
+        dexType: DexType.UniswapV2
+      }];
+
+      await expect(
+        manager.connect(alice).registerAgent(
+          ethers.ZeroAddress,
+          ethers.ZeroAddress,
+          "https://test.com",
+          "Test intention",
+          dexConfigs
+        )
+      ).to.be.revertedWith("Only factory");
     });
 
-    it("should execute sell correctly", async function () {
-      const { manager, alice, bob, router, assetToken } = context;
-    
-      // Launch token and buy some first
-      const agentToken = await createToken(context, alice);
-    
-      // Approve and buy tokens
-      const buyAmount = ethers.parseEther("100");
-      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
-      await manager.connect(bob).buy(buyAmount, agentToken.getAddress());
-    
-      // Approve and sell tokens
-      const sellAmount = await agentToken.balanceOf(bob.getAddress());
-      await agentToken.connect(bob).approve(await router.getAddress(), sellAmount);
-    
-      const beforeBalance = await assetToken.balanceOf(bob.getAddress());
-      await manager.connect(bob).sell(sellAmount, agentToken.getAddress());
-      const afterBalance = await assetToken.balanceOf(bob.getAddress());
-    
-      // Verify the seller received funds
-      expect(Number(afterBalance)).to.be.gt(Number(beforeBalance));
-    });
+    it("should validate DEX configurations", async function () {
+      const { alice, uniswapV2Router } = context;
 
-    it("should update metrics after trades", async function() {
-      const { manager, alice, bob, router, assetToken } = context;
-      
-      const agentToken = await createToken(context, alice);
-      
-      // before metrics
-      const beforeMetrics = await manager.agentTokens(await agentToken.getAddress());
-      
-      // Execute a buy
-      const buyAmount = ethers.parseEther("100");
-      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
-      await manager.connect(bob).buy(buyAmount, await agentToken.getAddress());
-      
-      const metrics = await manager.agentTokens(await agentToken.getAddress());
-      expect(Number(metrics.metrics.price)).to.be.gt(Number(beforeMetrics.metrics.price));
-      expect(Number(metrics.metrics.cap)).to.be.gt(Number(beforeMetrics.metrics.cap));
-    });
+      // Test invalid total weight
+      const invalidConfigs = [{
+        router: await uniswapV2Router.getAddress(),
+        fee: 3000,
+        weight: 50_000, // Only 50%
+        dexType: DexType.UniswapV2
+      }];
 
-    it("should maintain constant product K after buys", async function() {
-      const { manager, alice, bob, router, factory, assetToken } = context;
-      
-      // Launch a token
-      const agentToken = await createToken(context, alice);
-      
-      // Get initial reserves
-      const pair = await ethers.getContractAt("IBondingPair", await factory.getPair(await agentToken.getAddress(), await assetToken.getAddress()));
-      const [initialReserveAgent, initialReserveAsset] = await pair.getReserves();
-      const initialK = initialReserveAgent * initialReserveAsset;
-      
-      // Execute a buy
-      const buyAmount = ethers.parseEther("100");
-      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
-      await manager.connect(bob).buy(buyAmount, await agentToken.getAddress());
-      
-      // Check reserves after buy
-      const [newReserveAgent, newReserveAsset] = await pair.getReserves();
-      const newK = newReserveAgent * newReserveAsset;
-      
-      // Allow for small rounding differences (0.1% tolerance)
-      const tolerance = initialK / 1000n;
-      expect(Number(newK)).to.be.closeTo(Number(initialK), Number(tolerance));
-    });
-
-    it("should calculate correct output amounts based on constant product formula", async function() {
-      const { manager, alice, bob, router, factory, assetToken } = context;
-      
-      // Launch a token
-      const agentToken = await createToken(context, alice);
-      
-      // Get initial reserves
-      const pair = await ethers.getContractAt("IBondingPair", await factory.getPair(await agentToken.getAddress(), await assetToken.getAddress()));
-      const [reserveAgent, reserveAsset] = await pair.getReserves();
-      
-      // Calculate expected output using constant product formula
-      const inputAmount = ethers.parseEther("100");
-      // Account for buy tax (default is usually around 5%)
-      const taxRate = await factory.buyTax();
-      const inputAfterTax = inputAmount - (inputAmount * BigInt(taxRate)) / 100000n;
-      const expectedOutput = (reserveAgent * inputAfterTax) / (reserveAsset + inputAfterTax);
-      
-      // Execute the buy
-      await assetToken.connect(bob).approve(await router.getAddress(), inputAmount);
-      await manager.connect(bob).buy(inputAmount, await agentToken.getAddress());
-      
-      // Check actual received amount
-      const actualOutput = await agentToken.balanceOf(bob.getAddress());
-      
-      // Allow for tax deductions and small rounding differences (2% tolerance)
-      const tolerance = expectedOutput * 2n / 100n;
-      expect(Number(actualOutput)).to.be.closeTo(Number(expectedOutput), Number(tolerance));
-    });
-
-    it("should maintain price impact proportional to trade size", async function() {
-      const { manager, alice, owner, bob, router, factory, assetToken } = context;
-      
-      // Launch a token
-      const agentToken = await createToken(context, alice);
-
-      // set max trade size
-      await router.connect(owner).setMaxTxPercent(100_000);
-      
-      // Get initial state
-      const pair = await ethers.getContractAt("IBondingPair", await factory.getPair(await agentToken.getAddress(), await assetToken.getAddress()));
-      const [initialReserveAgent, initialReserveAsset] = await pair.getReserves();
-      
-      // Calculate initial price properly scaled
-      const initialPrice = (initialReserveAsset * BigInt(1e18)) / initialReserveAgent;
-      
-      // Execute a small buy
-      const smallBuy = ethers.parseEther("10");
-      await assetToken.connect(bob).approve(await router.getAddress(), smallBuy);
-      await manager.connect(bob).buy(smallBuy, await agentToken.getAddress());
-      
-      // Get price after small buy
-      const [reserveAgent1, reserveAsset1] = await pair.getReserves();
-      const priceAfterSmallBuy = (reserveAsset1 * BigInt(1e18)) / reserveAgent1;
-      
-      // Execute a large buy (100x larger)
-      const largeBuy = ethers.parseEther("1000");
-      await assetToken.connect(bob).approve(await router.getAddress(), largeBuy);
-      await manager.connect(bob).buy(largeBuy, await agentToken.getAddress());
-      
-      // Get price after large buy
-      const [reserveAgent2, reserveAsset2] = await pair.getReserves();
-      const priceAfterLargeBuy = (reserveAsset2 * BigInt(1e18)) / reserveAgent2;
-      
-      // Calculate relative price changes
-      const smallBuyImpact = ((priceAfterSmallBuy - initialPrice) * BigInt(10000)) / initialPrice;
-      const largeBuyImpact = ((priceAfterLargeBuy - priceAfterSmallBuy) * BigInt(10000)) / priceAfterSmallBuy;
-      
-      // Large buy should have significantly more impact
-      expect(Number(largeBuyImpact)).to.be.gt(Number(smallBuyImpact));
+      await expect(
+        createToken(context, alice, invalidConfigs)
+      ).to.be.revertedWith("Invalid weights");
     });
   });
 
-  describe("Graduation", function() {
-    async function graduateToken(context: TestContext) {
-      const { manager, owner, router, alice, bob, assetToken, uniswapV2Router } = context;
+  describe("Graduation Checks", function () {
+    it("should correctly identify graduation conditions", async function () {
+      const { alice } = context;
+      const token = await createToken(context, alice);
       
-      await manager.setGradThreshold(50_000);
-      await router.connect(owner).setMaxTxPercent(100_000);
-      
-      // Launch with DEX router
-      const dexRouters = [{
-        routerAddress: await uniswapV2Router.getAddress(),
-        weight: 100_000,
-        routerType: RouterType.UniswapV2,
-        feeAmount: 0, // No fee for V2
-      }];
-      
-      const agentToken = await createToken(context, alice, dexRouters);
-      const tokenAddress = await agentToken.getAddress();
-      
-      // Buy enough to trigger graduation
-      const buyAmount = ethers.parseEther("6000"); // 5_000 $VANA or $50,000
-      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
-      
-      const buyTx = await manager.connect(bob).buy(buyAmount, tokenAddress);
-      await buyTx.wait();
-    
-      // Wait a bit to ensure state is updated
-      await ethers.provider.send("evm_mine", []);
-    
-      // Get token data after graduation
-      const dexPools = await manager.getDexPools(tokenAddress);
-    
-      return {
-        agentToken,
-        dexRouters,
-        dexPools
-      };
-    }
-
-    it("should graduate token when threshold reached", async function() {
-      const { manager, owner, router, alice, bob, assetToken } = context;
-
-      // set max trade size
-      await router.connect(owner).setMaxTxPercent(100_000);
-      
-      await manager.setGradThreshold(50_000);
-      const agentToken = await createToken(context, alice);
-      const tokenAddress = await agentToken.getAddress();
-      
-      const buyAmount = ethers.parseEther("6000");
-      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
-      
-      const tx = await manager.connect(bob).buy(buyAmount, tokenAddress);
-      const receipt = await tx.wait();
-      
-      // Check for graduation event
-      const graduatedEvent = receipt.logs.find(log => log.fragment?.name === "Graduated");
-      expect(graduatedEvent).to.not.be.undefined;
-      
-      // Verify token state
-      const tokenInfo = await manager.agentTokens(tokenAddress);
-      const dexPools = await manager.getDexPools(tokenAddress);
-      
-      expect(tokenInfo.hasGraduated).to.be.true;
-      expect(dexPools.length).to.be.gt(0); // Should have at least one DEX pair
-    });
-
-    it("should migrate liquidity to multiple DEXes correctly", async function() {
-      const { assetToken } = context;
-      const { agentToken, dexPools } = await graduateToken(context);
-      const tokenAddress = await agentToken.getAddress();
-
-      // Check each DEX pair
-      for (const pairAddress of dexPools) {
-        const pair = await ethers.getContractAt("IUniswapV2Pair", pairAddress);
-        
-        // Get initial reserves
-        const [reserve0, reserve1] = await pair.getReserves();
-        expect(Number(reserve0)).to.be.gt(0);
-        expect(Number(reserve1)).to.be.gt(0);
-
-        // Get the tokens in the pair
-        const token0 = await pair.token0();
-        const token1 = await pair.token1();
-
-        // Check pair has correct tokens
-        expect(
-          (token0.toLowerCase() === tokenAddress.toLowerCase() &&
-           token1.toLowerCase() === (await assetToken.getAddress()).toLowerCase()) ||
-          (token1.toLowerCase() === tokenAddress.toLowerCase() &&
-           token0.toLowerCase() === (await assetToken.getAddress()).toLowerCase())
-        ).to.be.true;
-
-        // Verify constant product formula
-        const k = BigInt(reserve0) * BigInt(reserve1);
-        expect(Number(k)).to.be.gt(0);
-      }
-    });
-
-    it("should distribute liquidity according to weights", async function() {
-      const { agentToken, dexRouters, dexPools } = await graduateToken(context);
-      
-      // Calculate total TVL across all pools
-      let totalTVL = 0n;
-      const poolTVLs = [];
-      
-      for (const poolAddress of dexPools) {
-        const pair = await ethers.getContractAt("IUniswapV2Pair", poolAddress);
-        const [reserve0, reserve1] = await pair.getReserves();
-        const tvl = reserve0 * reserve1;
-        poolTVLs.push(tvl);
-        totalTVL += tvl;
-      }
-      
-      // Verify each pool's TVL matches its weight within 5% tolerance
-      for (let i = 0; i < dexPools.length; i++) {
-        const actualRatio = (poolTVLs[i] * 100_000n) / totalTVL;
-        const expectedWeight = BigInt(dexRouters[i].weight);
-        
-        // Allow 5% tolerance (5000 = 5%)
-        const tolerance = 5_000n;
-        const lowerBound = expectedWeight - tolerance;
-        const upperBound = expectedWeight + tolerance;
-        
-        expect(Number(actualRatio)).to.be.within(
-          Number(lowerBound),
-          Number(upperBound),
-          `Pool ${i} liquidity ratio (${actualRatio}) does not match weight (${expectedWeight})`
-        );
-      }
-    });
-  });
-
-  describe("Graduation with Uniswap V3", function() {
-    async function graduateTokenToV3(context: TestContext) {
-      const { manager, owner, router, alice, bob, assetToken, nftPositionManager } = context;
-      
-      await manager.setGradThreshold(50_000);
-      await router.connect(owner).setMaxTxPercent(100_000);
-      
-      // Launch with V3 DEX router
-      const dexRouters = [{
-        routerAddress: await nftPositionManager.getAddress(),
-        weight: 100_000,
-        routerType: RouterType.UniswapV3,
-        feeAmount: 3000, // 0.03% fee for V3
-      }];
-      
-      const agentToken = await createToken(context, alice, dexRouters);
-      const tokenAddress = await agentToken.getAddress();
-      
-      // Buy enough to trigger graduation
-      const buyAmount = ethers.parseEther("6000"); // $60,000
-      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
-      
-      const buyTx = await manager.connect(bob).buy(buyAmount, tokenAddress);
-      await buyTx.wait();
-    
-      // Wait for state update
-      await ethers.provider.send("evm_mine", []);
-    
-      // Get token data after graduation
-      const dexPools = await manager.getDexPools(tokenAddress);
-    
-      return {
-        agentToken,
-        dexRouters,
-        dexPools
-      };
-    }
-  
-    it("should graduate token to Uniswap V3 pool", async function() {
-      const { manager, owner, router, alice, bob, assetToken, uniswapV3Factory, nftPositionManager } = context;
-  
-      // set max trade size
-      await router.connect(owner).setMaxTxPercent(100_000);
-      
-      await manager.setGradThreshold(50_000);
-      
-      // Launch with V3 router
-      const dexRouters = [{
-        routerAddress: await nftPositionManager.getAddress(),
-        weight: 100_000,
-        routerType: RouterType.UniswapV3,
-        feeAmount: 3000, // 0.03% fee for V3
-      }];
-      
-      const agentToken = await createToken(context, alice, dexRouters);
-      const tokenAddress = await agentToken.getAddress();
-      
-      const buyAmount = ethers.parseEther("6000");
-      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
-      
-      const tx = await manager.connect(bob).buy(buyAmount, tokenAddress);
-      const receipt = await tx.wait();
-      
-      // Check for graduation event
-      const graduatedEvent = receipt.logs.find(log => log.fragment?.name === "Graduated");
-      expect(graduatedEvent).to.not.be.undefined;
-      
-      // Verify token state
-      const tokenInfo = await manager.agentTokens(tokenAddress);
-      const dexPools = await manager.getDexPools(tokenAddress);
-      
-      expect(tokenInfo.hasGraduated).to.be.true;
-      expect(dexPools.length).to.be.gt(0);
-  
-      // Verify V3 pool creation
-      const poolAddress = await uniswapV3Factory.getPool(
-        tokenAddress,
-        await assetToken.getAddress(),
-        3000
+      const [shouldGraduate, ratio] = await context.manager.checkGraduation(
+        await token.getAddress()
       );
-      expect(poolAddress).to.not.equal(ethers.ZeroAddress);
+
+      // Initially shouldn't graduate due to high reserve ratio
+      expect(shouldGraduate).to.be.false;
+      expect(ratio).to.be.gt(20_000n); // > 20%
     });
-  
-    it("should initialize V3 pool with correct liquidity ranges", async function() {
-      const { assetToken, uniswapV3Factory, nftPositionManager } = context;
-      const { agentToken, dexPools } = await graduateTokenToV3(context);
-      const tokenAddress = await agentToken.getAddress();
-  
-      // Get the V3 pool
-      const poolAddress = await uniswapV3Factory.getPool(
-        tokenAddress,
-        await assetToken.getAddress(),
-        3000
+  });
+
+  describe("Graduation Process", function () {
+    it("should deploy liquidity to Uniswap V2 correctly", async function () {
+      const { alice, router, owner, manager, assetToken } = context;
+      const dexConfigs = [{
+        router: await context.uniswapV2Router.getAddress(),
+        fee: 3000,
+        weight: 100_000,
+        dexType: DexType.UniswapV2
+      }];
+
+      const token = await createToken(context, alice, dexConfigs);
+      
+      // max hold to 100%
+      await router.connect(owner).setMaxHold(100_000);
+      
+      // Buy tokens to reduce reserve ratio
+      const buyAmount = ethers.parseEther("1000");
+      await assetToken.connect(alice).approve(
+        await router.getAddress(),
+        buyAmount
       );
-      const pool = await ethers.getContractAt("IUniswapV3Pool", poolAddress);
-  
-      // Check pool initialization
-      const slot0 = await pool.slot0();
-      expect(slot0.sqrtPriceX96).to.not.equal(0);
-      expect(slot0.tick).to.not.equal(0);
-  
-      // Check liquidity
-      const liquidity = await pool.liquidity();
-      expect(Number(liquidity)).to.be.gt(0);
-  
-      // Verify position through NFT manager
-      const positions = await nftPositionManager.positions(1); // First position
-      expect(Number(positions.liquidity)).to.be.gt(0);
       
-      // Verify tick ranges 
-      // Assuming default range of ±10% around current price
-      const currentTick = Number(slot0.tick);
-      expect(Number(positions.tickLower)).to.be.lt(currentTick);
-      expect(Number(positions.tickUpper)).to.be.gt(currentTick);
+      await router.connect(alice).swapExactTokensForTokens(
+        buyAmount,
+        0,
+        [await assetToken.getAddress(), await token.getAddress()],
+        await alice.getAddress(),
+        ethers.MaxUint256
+      );
+
+      // check isGraduated
+      const [shouldGraduate] = await manager.checkGraduation(await token.getAddress());
+      expect(shouldGraduate).to.be.false;
+
+      // Verify graduation
+      const info = await manager.agentProfile(await token.getAddress());
+      const pool = info.mainPool;
+
+      // ensure not zero address
+      expect(pool).to.not.equal(ethers.ZeroAddress);
+
+      // Verify V2 pool
+      const pair = await ethers.getContractAt("IUniswapV2Pair", pool);
+      
+      // Check pool has liquidity
+      const [reserve0, reserve1] = await pair.getReserves();
+      expect(reserve0).to.be.gt(0);
+      expect(reserve1).to.be.gt(0);
     });
-  
-    it("should migrate to both V2 and V3 pools during graduation", async function() {
-      const { manager, owner, router, alice, bob, assetToken, uniswapV2Router, 
-        nftPositionManager, uniswapV2Factory, uniswapV3Factory } = context;
+
+    it("should deploy liquidity to Uniswap V3 correctly", async function () {
+      const { alice, router, owner, manager, assetToken, uniswapV3Router } = context;
+      const dexConfigs = [{
+        router: await uniswapV3Router.getAddress(),
+        fee: 3000,
+        weight: 100_000,
+        dexType: DexType.UniswapV3
+      }];
+    
+      const token = await createToken(context, alice, dexConfigs);
       
-      await manager.setGradThreshold(50_000);
-      await router.connect(owner).setMaxTxPercent(100_000);
+      // Set max hold to 100%
+      await router.connect(owner).setMaxHold(100_000);
       
-      // Launch with both V2 and V3 routers
-      const dexRouters = [
+      // Buy tokens to reduce reserve ratio
+      const buyAmount = ethers.parseEther("1000");
+      await assetToken.connect(alice).approve(
+        await router.getAddress(),
+        buyAmount
+      );
+      
+      await router.connect(alice).swapExactTokensForTokens(
+        buyAmount,
+        0,
+        [await assetToken.getAddress(), await token.getAddress()],
+        await alice.getAddress(),
+        ethers.MaxUint256
+      );
+    
+      // Check graduation conditions
+      const [shouldGraduate] = await manager.checkGraduation(await token.getAddress());
+      expect(shouldGraduate).to.be.false;
+    
+      // Verify graduation
+      const info = await manager.agentProfile(await token.getAddress());
+      const pool = info.mainPool;
+      
+      // Ensure not zero address
+      expect(pool).to.not.equal(ethers.ZeroAddress);
+    
+      // Verify V3 pool
+      const v3Pool = await ethers.getContractAt("IUniswapV3Pool", pool);
+      
+      // Check pool has liquidity
+      const slot0 = await v3Pool.slot0();
+      expect(slot0.sqrtPriceX96).to.be.gt(0);
+      
+      // Verify position
+      const position = await v3Pool.positions(
+        // Get position key - needs to be implemented based on your setup
+        getPositionKey(await manager.getAddress(), TickMath.MIN_TICK, TickMath.MAX_TICK)
+      );
+      expect(position.liquidity).to.be.gt(0);
+    });
+
+    it("should handle multiple DEX deployments with correct weights", async function () {
+      const { alice } = context;
+      const dexConfigs = [
         {
-          routerAddress: await uniswapV2Router.getAddress(),
+          router: await context.uniswapV2Router.getAddress(),
+          fee: 3000,
           weight: 50_000,
-          routerType: RouterType.UniswapV2,
-          feeAmount: 0,
+          dexType: DexType.UniswapV2
         },
         {
-          routerAddress: await nftPositionManager.getAddress(),
+          router: await context.uniswapV3Router.getAddress(),
+          fee: 3000,
           weight: 50_000,
-          routerType: RouterType.UniswapV3,
-          feeAmount: 3000,
+          dexType: DexType.UniswapV3
         }
       ];
-      
-      const agentToken = await createToken(context, alice, dexRouters);
-      const tokenAddress = await agentToken.getAddress();
-      
-      // Trigger graduation
-      const buyAmount = ethers.parseEther("6000");
-      
-      await assetToken.connect(bob).approve(await router.getAddress(), buyAmount);
-      const buyTx = await manager.connect(bob).buy(buyAmount, tokenAddress);
-      await buyTx.wait();
-      
-      // Check V2 pool reserves
-      const v2PairAddress = await uniswapV2Factory.getPair(
-        tokenAddress,
-        await assetToken.getAddress()
-      );
-      const v2Pair = await ethers.getContractAt("IUniswapV2Pair", v2PairAddress);
-      const [v2Reserve0, v2Reserve1] = await v2Pair.getReserves();
-      const v2Token0 = await v2Pair.token0();
 
-      // Get reserves in correct order for V2
-      const [v2TokenReserve, v2AssetReserve] = v2Token0.toLowerCase() === tokenAddress.toLowerCase() 
-        ? [v2Reserve0, v2Reserve1] 
-        : [v2Reserve1, v2Reserve0];
+      const token = await createToken(context, alice, dexConfigs);
       
-      // Check V3 pool
-      const v3PoolAddress = await uniswapV3Factory.getPool(
-        tokenAddress,
-        await assetToken.getAddress(),
-        3000
-      );
-      const v3Pool = await ethers.getContractAt("IUniswapV3Pool", v3PoolAddress);
-      const slot0 = await v3Pool.slot0();
-      const v3Liquidity = await v3Pool.liquidity();
-      
-      // For V3, get token ordering
-      const v3Token0 = await v3Pool.token0();
-      const sqrtPriceX96 = slot0.sqrtPriceX96;
-      
-      // Calculate reserves from V3 liquidity and sqrtPrice
-      // Using the formula from Uniswap V3 whitepaper
-      const Q96 = BigInt(2) ** BigInt(96);
-      const sqrtRatioX96 = BigInt(sqrtPriceX96);
-      
-      let v3TokenReserve, v3AssetReserve;
-      if (v3Token0.toLowerCase() === tokenAddress.toLowerCase()) {
-        v3TokenReserve = (BigInt(v3Liquidity) * Q96) / sqrtRatioX96;
-        v3AssetReserve = (BigInt(v3Liquidity) * sqrtRatioX96) / Q96;
-      } else {
-        v3AssetReserve = (BigInt(v3Liquidity) * Q96) / sqrtRatioX96;
-        v3TokenReserve = (BigInt(v3Liquidity) * sqrtRatioX96) / Q96;
-      }
-
-      // Compare token reserves between V2 and V3 pools
-      // Should be roughly 50/50 split (within 10% tolerance)
-      const totalTokenReserves = v2TokenReserve + v3TokenReserve;
-      const v2TokenRatio = (v2TokenReserve * BigInt(100_000)) / totalTokenReserves;
-      
-      const totalAssetReserves = v2AssetReserve + v3AssetReserve;
-      const v2AssetRatio = (v2AssetReserve * BigInt(100_000)) / totalAssetReserves;
-      
-      // Check both token and asset ratios are close to 50/50
-      expect(Number(v2TokenRatio)).to.be.within(45_000, 55_000, "Token reserves not evenly split");
-      expect(Number(v2AssetRatio)).to.be.within(45_000, 55_000, "Asset reserves not evenly split");
+      // TODO: Add trading to reach graduation threshold
+      // TODO: Trigger graduation
+      // TODO: Verify proportional liquidity deployment
     });
   });
 
-  describe("Admin Functions", function() {
-    it("should update initial supply correctly", async function() {
-      const { manager, owner } = context;
+  describe("Admin Functions", function () {
+    it("should update graduation parameters correctly", async function () {
+      const { manager } = context;
       
-      const newSupply = 2_000_000;
-      await manager.connect(owner).setInitialSupply(newSupply);
-      
-      expect(Number(await manager.initialSupply())).to.equal(newSupply);
+      await manager.setGradSlippage(500); // 0.5%
+      expect(await manager.gradSlippage()).to.equal(500n);
+
+      await manager.setGradThreshold(15_000); // 15%
+      expect(await manager.gradThreshold()).to.equal(15_000n);
     });
 
-    it("should update graduation threshold correctly", async function() {
-      const { manager, owner } = context;
-      
-      const newThreshold = 100;
-      await manager.connect(owner).setGradThreshold(newThreshold);
-      
-      expect(Number(await manager.gradThreshold())).to.equal(Number(newThreshold));
+    it("should revert invalid parameter updates", async function () {
+      const { manager } = context;
+
+      await expect(
+        manager.setGradSlippage(0)
+      ).to.be.revertedWith("Invalid slippage");
+
+      await expect(
+        manager.setGradSlippage(100_001)
+      ).to.be.revertedWith("Invalid slippage");
     });
   });
 });

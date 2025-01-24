@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "hardhat/console.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
@@ -25,6 +27,9 @@ import "../interfaces/IRouter.sol";
 import "../interfaces/IFactory.sol";
 import "../interfaces/IBondingPair.sol";
 import "../interfaces/IToken.sol";
+
+// tick math
+import "../libraries/TickMath.sol";
 
 /**
  * @title Manager
@@ -81,11 +86,12 @@ contract Manager is
      * @param dexConfigs DEX deployment settings
      * @param dexPools Deployed DEX pool addresses
      */
-    struct TokenInfo {
+    struct AgentProfile {
         address creator;
         string intention;
         string url;
         address bondingPair;
+        address mainPool;
         DexConfig[] dexConfigs;
         address[] dexPools;
     }
@@ -113,24 +119,27 @@ contract Manager is
     /// @notice Slippage tolerance for graduation liquidity deployment
     uint256 public gradSlippage;
 
+    /// @notice Graduation threshold for bonding pair liquidity
+    uint256 public gradThreshold;
+
     /// @notice Maps token addresses to their information
-    mapping(address => TokenInfo) public tokenInfo;
+    mapping(address => AgentProfile) public agentProfile;
 
     /// @notice List of all launched tokens
-    address[] public allTokens;
+    address[] public allAgents;
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Emitted when a token's information is registered
-     * @param token Token address
-     * @param creator Token creator
-     * @param intention Token purpose
+     * @notice Emitted when an agents information is registered
+     * @param token Agent address
+     * @param creator Agent creator
+     * @param intention Agent purpose
      * @param url Reference URL
      */
-    event TokenRegistered(
+    event AgentRegistered(
         address indexed token,
         address indexed creator,
         string intention,
@@ -138,11 +147,11 @@ contract Manager is
     );
 
     /**
-     * @notice Emitted when a token graduates to DEX trading
-     * @param token Token address
+     * @notice Emitted when an agent graduates to DEX trading
+     * @param token Agent address
      * @param pools Array of deployed DEX pools
      */
-    event TokenGraduated(
+    event AgentGraduated(
         address indexed token,
         address[] pools
     );
@@ -175,7 +184,8 @@ contract Manager is
     function initialize(
         address factory_,
         address assetToken_,
-        uint256 gradSlippage_
+        uint256 gradSlippage_,
+        uint256 gradThreshold_
     ) external initializer {
         __AccessControl_init();
         __ReentrancyGuard_init();
@@ -193,6 +203,7 @@ contract Manager is
         factory = IFactory(factory_);
         assetToken = assetToken_;
         gradSlippage = gradSlippage_;
+        gradThreshold = gradThreshold_;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -202,49 +213,82 @@ contract Manager is
     /**
      * @notice Registers a new token's information
      * @param token Token address
-     * @param intention Token purpose
+     * @param bondingPair Bonding pair address
      * @param url Reference URL
-     * @param configs DEX deployment configurations
+     * @param intention Token purpose
+     * @param _dexConfigs DEX deployment configurations
      */
-    function registerToken(
+    function registerAgent(
         address token,
-        string calldata intention,
+        address bondingPair,
         string calldata url,
-        DexConfig[] calldata configs
+        string calldata intention,
+        DexConfig[] calldata _dexConfigs
     ) external {
         require(msg.sender == address(factory), "Only factory");
-        require(tokenInfo[token].creator == address(0), "Already registered");
+        require(agentProfile[token].creator == address(0), "Already registered");
 
         // Validate DEX configs
         uint24 totalWeight;
-        for (uint i = 0; i < configs.length; i++) {
-            require(configs[i].router != address(0), "Invalid router");
+        for (uint i = 0; i < _dexConfigs.length; i++) {
+            require(_dexConfigs[i].router != address(0), "Invalid router");
             require(
-                configs[i].weight > 0 && 
-                configs[i].weight <= BASIS_POINTS,
+                _dexConfigs[i].weight > 0 && 
+                _dexConfigs[i].weight <= BASIS_POINTS,
                 "Invalid weight"
             );
-            totalWeight += configs[i].weight;
+            totalWeight += _dexConfigs[i].weight;
         }
         require(totalWeight == BASIS_POINTS, "Invalid weights");
 
-        // Get bonding pair
-        address bondingPair = factory.getPair(token, assetToken);
-        require(bondingPair != address(0), "Invalid pair");
-
         // Store token information
-        tokenInfo[token] = TokenInfo({
+        agentProfile[token] = AgentProfile({
             creator: tx.origin,
-            intention: intention,
             url: url,
+            intention: intention,
             bondingPair: bondingPair,
-            dexConfigs: configs,
+            mainPool: address(0),
+            dexConfigs: _dexConfigs,
             dexPools: new address[](0)
         });
 
-        allTokens.push(token);
+        // all agents
+        allAgents.push(token);
 
-        emit TokenRegistered(token, tx.origin, intention, url);
+        // emit registration event
+        emit AgentRegistered(token, tx.origin, intention, url);
+    }
+
+    /**
+     * @notice Checks if token should graduate based on reserve ratio
+     * @param token Agent token address
+     * @return shouldGraduate True if graduation conditions are met
+     * @return reserveRatio Current reserve ratio if available
+     */
+    function checkGraduation(
+        address token
+    ) external view returns (bool shouldGraduate, uint256 reserveRatio) {
+        AgentProfile storage info = agentProfile[token];
+        
+        // Already graduated
+        if (info.dexPools.length > 0) {
+            return (false, 0);
+        }
+
+        // Get bonding pair info
+        IBondingPair pair = IBondingPair(info.bondingPair);
+        (uint256 reserveAgent,,) = pair.getReserves();
+        
+        // Calculate reserve ratio
+        uint256 totalSupply = IERC20(token).totalSupply();
+        if (totalSupply == 0 || reserveAgent == 0) {
+            return (false, 0);
+        }
+
+        reserveRatio = (reserveAgent * BASIS_POINTS) / totalSupply;
+
+        // return graduation conditions
+        return (reserveRatio <= gradThreshold, reserveRatio);
     }
 
     /**
@@ -252,18 +296,24 @@ contract Manager is
      * @param token Token address
      */
     function graduate(address token) external nonReentrant {
-        TokenInfo storage info = tokenInfo[token];
-        require(msg.sender == info.bondingPair, "Only bonding pair");
+        AgentProfile storage info = agentProfile[token];
+        require(msg.sender == factory.router(), "Only router");
         require(info.dexPools.length == 0, "Already graduated");
 
         // Get bonding pair liquidity
         IBondingPair pair = IBondingPair(info.bondingPair);
-        uint256 tokenBalance = pair.balance();
-        uint256 assetBalance = pair.assetBalance();
+        (uint256 tokenBalance, uint256 assetBalance,) = pair.getReserves();
 
         require(
             tokenBalance > 0 && assetBalance > 0,
             "Insufficient liquidity"
+        );
+
+        // Transfer tokens from bonding pair
+        IRouter(factory.router()).transferLiquidityToManager(
+            token,
+            tokenBalance,
+            assetBalance
         );
 
         // Deploy to configured DEXes
@@ -304,9 +354,10 @@ contract Manager is
 
         // Update token state
         info.dexPools = pools;
+        info.mainPool = pools[0];
         IToken(token).graduate(pools);
 
-        emit TokenGraduated(token, pools);
+        emit AgentGraduated(token, pools);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -321,7 +372,7 @@ contract Manager is
     function getDexPools(
         address token
     ) external view returns (address[] memory) {
-        return tokenInfo[token].dexPools;
+        return agentProfile[token].dexPools;
     }
 
     /**
@@ -329,29 +380,7 @@ contract Manager is
      * @return Token count
      */
     function tokenCount() external view returns (uint256) {
-        return allTokens.length;
-    }
-
-    /**
-     * @notice Returns a page of token addresses
-     * @param offset Starting index
-     * @param limit Maximum number of items
-     * @return tokens Token addresses
-     */
-    function getTokens(
-        uint256 offset,
-        uint256 limit
-    ) external view returns (address[] memory tokens) {
-        require(offset < allTokens.length, "Invalid offset");
-        uint256 end = Math.min(offset + limit, allTokens.length);
-        uint256 length = end - offset;
-
-        tokens = new address[](length);
-        for (uint256 i = 0; i < length; i++) {
-            tokens[i] = allTokens[offset + i];
-        }
-
-        return tokens;
+        return allAgents.length;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -373,6 +402,16 @@ contract Manager is
         emit GraduationParamsUpdated(gradSlippage_);
     }
 
+    /**
+     * @notice Updates graduation threshold
+     * @param gradThreshold_ New threshold
+     */
+    function setGradThreshold(
+        uint256 gradThreshold_
+    ) external onlyRole(ADMIN_ROLE) {
+        gradThreshold = gradThreshold_;
+    }
+
     /*//////////////////////////////////////////////////////////////
                          INTERNAL DEX FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -391,8 +430,8 @@ contract Manager is
         uint256 tokenAmount,
         uint256 assetAmount
     ) internal returns (address pool) {
-        IUniswapV2Router02 router = IUniswapV2Router02(routerAddress);
-        IUniswapV2Factory dexFactory = IUniswapV2Factory(router.factory());
+        IUniswapV2Router02 dexRouter = IUniswapV2Router02(routerAddress);
+        IUniswapV2Factory dexFactory = IUniswapV2Factory(dexRouter.factory());
 
         // Get or create pool
         pool = dexFactory.getPair(token, assetToken);
@@ -404,23 +443,18 @@ contract Manager is
         uint256 minTokenAmount = (tokenAmount * (BASIS_POINTS - gradSlippage)) / BASIS_POINTS;
         uint256 minAssetAmount = (assetAmount * (BASIS_POINTS - gradSlippage)) / BASIS_POINTS;
 
-        // Transfer tokens from bonding pair
-        TokenInfo storage info = tokenInfo[token];
-        IBondingPair(info.bondingPair).transferTo(address(this), tokenAmount);
-        IBondingPair(info.bondingPair).transferAsset(address(this), assetAmount);
-
         // Approve and add liquidity
         IERC20(token).forceApprove(routerAddress, tokenAmount);
         IERC20(assetToken).forceApprove(routerAddress, assetAmount);
 
-        router.addLiquidity(
+        dexRouter.addLiquidity(
             token,
             assetToken,
             tokenAmount,
             assetAmount,
             minTokenAmount,
             minAssetAmount,
-            address(this),
+            address(0),
             block.timestamp
         );
 
@@ -443,47 +477,76 @@ contract Manager is
         uint256 assetAmount,
         uint24 fee
     ) internal returns (address pool) {
+        console.log("\n=== Starting V3 Deployment ===");
+        
         INonfungiblePositionManager posManager = INonfungiblePositionManager(routerAddress);
         IUniswapV3Factory v3Factory = IUniswapV3Factory(posManager.factory());
 
-        // Sort tokens (required by V3)
-        (address token0, address token1) = token < assetToken 
-            ? (token, assetToken) 
-            : (assetToken, token);
-        
-        (uint256 amount0, uint256 amount1) = token < assetToken
-            ? (tokenAmount, assetAmount)
-            : (assetAmount, tokenAmount);
+        // Sort tokens and amounts
+        (address token0, address token1) = token < assetToken ? (token, assetToken) : (assetToken, token);
+        (uint256 amount0, uint256 amount1) = token < assetToken ? (tokenAmount, assetAmount) : (assetAmount, tokenAmount);
 
-        // Transfer tokens from bonding pair
-        TokenInfo storage info = tokenInfo[token];
-        IBondingPair(info.bondingPair).transferTo(address(this), tokenAmount);
-        IBondingPair(info.bondingPair).transferAsset(address(this), assetAmount);
-
-        // Approve tokens to position manager
-        IERC20(token0).forceApprove(routerAddress, amount0);
-        IERC20(token1).forceApprove(routerAddress, amount1);
+        console.log("Token ordering:");
+        console.log(" - token0:", token0);
+        console.log(" - token1:", token1);
+        console.log(" - amount0:", amount0);
+        console.log(" - amount1:", amount1);
 
         // Get or create pool
         pool = v3Factory.getPool(token0, token1, fee);
+        console.log("\nPool status:", pool != address(0) ? "exists" : "needs creation");
+        
         if (pool == address(0)) {
+            console.log("\nCreating new pool...");
             pool = v3Factory.createPool(token0, token1, fee);
+            console.log("Pool created at:", pool);
 
-            // Calculate initial sqrt price
-            uint256 price = (amount1 * 1e18) / amount0;
-            uint160 sqrtPriceX96 = uint160(Math.sqrt(price) * 2**96);
-            
             // Initialize pool
+            uint256 price = (amount1 * 1e18) / amount0;
+            uint256 sqrtPrice = Math.sqrt(price * 1e18);
+            uint160 sqrtPriceX96 = uint160((sqrtPrice * (2**96)) / 1e18);
+            
+            console.log("\nPool initialization:");
+            console.log(" - raw price:", price);
+            console.log(" - sqrt price:", sqrtPrice);
+            console.log(" - sqrtPriceX96:", sqrtPriceX96);
+            
             IUniswapV3Pool(pool).initialize(sqrtPriceX96);
+            console.log("Pool initialized successfully");
         }
 
-        // Calculate tick range for position
+        // Get pool state
+        (uint160 currentSqrtPrice, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
+        console.log("\nCurrent pool state:");
+        console.log(" - sqrt price:", currentSqrtPrice);
+        console.log(" - tick:", uint24(currentTick));
+        console.log(" - liquidity:", IUniswapV3Pool(pool).liquidity());
+
+        // Approve tokens
+        IERC20(token0).forceApprove(address(posManager), amount0);
+        IERC20(token1).forceApprove(address(posManager), amount1);
+
+        console.log("\nToken approvals and balances:");
+        console.log(" - token0 approved:", IERC20(token0).allowance(address(this), address(posManager)));
+        console.log(" - token1 approved:", IERC20(token1).allowance(address(this), address(posManager)));
+        console.log(" - token0 balance:", IERC20(token0).balanceOf(address(this)));
+        console.log(" - token1 balance:", IERC20(token1).balanceOf(address(this)));
+
+        // Calculate ticks
         int24 tickSpacing = IUniswapV3Pool(pool).tickSpacing();
         int24 tickLower = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
         int24 tickUpper = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
 
-        // Create position with full range
-        posManager.mint(
+        console.log("\nPosition parameters:");
+        console.log(" - tick spacing:", uint24(tickSpacing));
+        console.log(" - tick lower:", uint24(tickLower * -1));
+        console.log(" - tick upper:", uint24(tickUpper));
+        console.log(" - amount0 min:", (amount0 * (BASIS_POINTS - gradSlippage)) / BASIS_POINTS);
+        console.log(" - amount1 min:", (amount1 * (BASIS_POINTS - gradSlippage)) / BASIS_POINTS);
+
+        // Mint position
+        console.log("\nAttempting to mint position...");
+        try posManager.mint(
             INonfungiblePositionManager.MintParams({
                 token0: token0,
                 token1: token1,
@@ -492,12 +555,22 @@ contract Manager is
                 tickUpper: tickUpper,
                 amount0Desired: amount0,
                 amount1Desired: amount1,
-                amount0Min: (amount0 * (BASIS_POINTS - gradSlippage)) / BASIS_POINTS,
-                amount1Min: (amount1 * (BASIS_POINTS - gradSlippage)) / BASIS_POINTS,
+                amount0Min: 0,
+                amount1Min: 0,
                 recipient: address(this),
-                deadline: block.timestamp
+                deadline: block.timestamp + 3600
             })
-        );
+        ) returns (uint256 tokenId, uint128 liquidity, uint256 amount0Added, uint256 amount1Added) {
+            console.log("Mint succeeded:");
+            console.log(" - tokenId:", tokenId);
+            console.log(" - liquidity:", liquidity);
+            console.log(" - amount0:", amount0Added);
+            console.log(" - amount1:", amount1Added);
+        } catch (bytes memory reason) {
+            console.log("Mint failed! Error data:");
+            console.logBytes(reason);
+            revert("V3: Mint failed");
+        }
 
         return pool;
     }
@@ -518,11 +591,6 @@ contract Manager is
     ) internal returns (address pool) {
         IVelodromeRouter router = IVelodromeRouter(routerAddress);
         IVelodromeFactory veloFactory = IVelodromeFactory(router.factory());
-        
-        // Get bonding pair and transfer tokens
-        TokenInfo storage info = tokenInfo[token];
-        IBondingPair(info.bondingPair).transferTo(address(this), tokenAmount);
-        IBondingPair(info.bondingPair).transferAsset(address(this), assetAmount);
 
         // Approve tokens to router
         IERC20(token).forceApprove(routerAddress, tokenAmount);

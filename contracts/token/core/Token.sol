@@ -6,6 +6,9 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
+// interfaces
+import "../interfaces/IRouter.sol";
+
 /**
  * @title Token
  * @dev Implementation of an AI agent token with tax and graduation mechanics.
@@ -38,26 +41,26 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Token URL for metadata
+    string public url;
+
+    /// @notice Token intention for metadata
+    string public intention;
+
     /// @notice Buy tax rate in basis points
     uint256 public buyTax;
 
     /// @notice Sell tax rate in basis points
     uint256 public sellTax;
 
-    /// @notice Maximum transaction size as percentage of total supply
-    uint256 public maxTxPercent;
-
     /// @notice Address where tax is collected
     address public immutable taxVault;
 
-    /// @notice Router contract that manages trading
-    address public immutable router;
+    /// @notice Manager contract that manages graduation
+    address public immutable manager;
 
     /// @notice Whether token has graduated to DEX trading
     bool public hasGraduated;
-
-    /// @notice Maps addresses that are excluded from transaction limits
-    mapping(address => bool) public isTxLimitExempt;
 
     /// @notice Maps addresses that are excluded from taxes
     mapping(address => bool) public isTaxExempt;
@@ -81,12 +84,6 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
      * @param sellTax_ New sell tax rate
      */
     event TaxUpdated(uint256 buyTax_, uint256 sellTax_);
-
-    /**
-     * @notice Emitted when max transaction percent is updated
-     * @param maxTxPercent_ New max transaction percent
-     */
-    event MaxTxPercentUpdated(uint256 maxTxPercent_);
 
     /**
      * @notice Emitted when a pool status is updated
@@ -118,7 +115,9 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
      * @param name_ Token name
      * @param symbol_ Token symbol
      * @param initialSupply_ Initial supply in whole tokens
-     * @param router_ Router contract address
+     * @param url_ Token URL for metadata
+     * @param intention_ Token intention for metadata
+     * @param manager_ Router contract address
      * @param taxVault_ Tax collection address
      * @dev Initial tax rates and transaction limits can be set by admin later
      */
@@ -126,30 +125,30 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
         string memory name_,
         string memory symbol_,
         uint256 initialSupply_,
-        address router_,
+        string memory url_,
+        string memory intention_,
+        address manager_,
         address taxVault_
     ) ERC20(name_, symbol_) ERC20Permit(name_) Ownable(msg.sender) {
-        require(router_ != address(0), "Invalid router");
+        require(manager_ != address(0), "Invalid manager");
         require(taxVault_ != address(0), "Invalid tax vault");
         require(initialSupply_ > 0, "Invalid supply");
 
-        router = router_;
+        url = url_;
+        intention = intention_;
+        manager = manager_;
         taxVault = taxVault_;
 
         // Setup default parameters
-        maxTxPercent = 1000; // 1% default max transaction
         buyTax = 500;        // 0.5% default buy tax
         sellTax = 500;       // 0.5% default sell tax
 
         // Default exemptions
         isTaxExempt[address(this)] = true;
         isTaxExempt[msg.sender] = true;
-        isTxLimitExempt[address(this)] = true;
-        isTxLimitExempt[msg.sender] = true;
-        isTxLimitExempt[router_] = true;
 
         // Mint initial supply
-        _mint(msg.sender, initialSupply_ * (10 ** decimals()));
+        _mint(msg.sender, initialSupply_);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -159,10 +158,10 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     /**
      * @notice Sets token graduation state and registers DEX pools
      * @param pools Array of DEX pool addresses
-     * @dev Can only be called by router and only once
+     * @dev Can only be called by manager and only once
      */
     function graduate(address[] calldata pools) external nonReentrant {
-        require(msg.sender == router, "Only router");
+        require(msg.sender == manager, "Only manager");
         require(!hasGraduated, "Already graduated");
         require(pools.length > 0, "No pools provided");
 
@@ -198,17 +197,6 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Updates maximum transaction size
-     * @param maxTxPercent_ New max transaction percent
-     */
-    function setMaxTxPercent(uint256 maxTxPercent_) external onlyOwner {
-        require(maxTxPercent_ > 0, "Invalid percent");
-        require(maxTxPercent_ <= 5000, "Max tx too high"); // Max 5%
-        maxTxPercent = maxTxPercent_;
-        emit MaxTxPercentUpdated(maxTxPercent_);
-    }
-
-    /**
      * @notice Sets or unsets a pool address
      * @param pool Pool address to update
      * @param isPool_ Whether address is a pool
@@ -228,17 +216,6 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
         require(account != address(0), "Invalid address");
         isTaxExempt[account] = isExempt;
         emit TaxExemptUpdated(account, isExempt);
-    }
-
-    /**
-     * @notice Updates transaction limit exemption for an address
-     * @param account Account to update
-     * @param isExempt Whether account should be exempt from limits
-     */
-    function setTxLimitExempt(address account, bool isExempt) external onlyOwner {
-        require(account != address(0), "Invalid address");
-        isTxLimitExempt[account] = isExempt;
-        emit TxLimitExemptUpdated(account, isExempt);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -274,26 +251,6 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Checks if a transfer amount exceeds limits
-     * @param from Sender address
-     * @param to Recipient address
-     * @param amount Transfer amount
-     */
-    function _checkTransferLimit(
-        address from,
-        address to,
-        uint256 amount
-    ) private view {
-        if (!hasGraduated && 
-            !isTxLimitExempt[from] && 
-            !isTxLimitExempt[to]
-        ) {
-            uint256 maxAmount = (totalSupply() * maxTxPercent) / BASIS_POINTS;
-            require(amount <= maxAmount, "Exceeds max transaction");
-        }
-    }
-
-    /**
      * @notice Override of ERC20 _update to implement taxes
      * @dev Collects tax and enforces transaction limits
      * @param from Sender address
@@ -305,17 +262,12 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
         address to,
         uint256 amount
     ) internal override {
-        // Check transaction limits
-        _checkTransferLimit(from, to, amount);
-
         // Calculate and collect tax
         uint256 taxAmount = _calculateTax(from, to, amount);
         
         if (taxAmount > 0) {
-            // Split tax between vault and admin
-            uint256 halfTax = taxAmount / 2;
-            super._update(from, taxVault, halfTax);
-            super._update(from, owner(), taxAmount - halfTax);
+            // send tax to taxVault
+            super._update(from, taxVault, taxAmount);
             amount -= taxAmount;
         }
 

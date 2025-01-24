@@ -6,44 +6,35 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
+import "../interfaces/IToken.sol";
 import "../interfaces/IRouter.sol";
 
 /**
  * @title BondingPair
- * @dev Implements a bonding curve automated market maker for agent tokens.
+ * @dev Implements a quadratic bonding curve automated market maker for agent tokens.
  * 
- * The bonding curve uses the formula: price = K / supply
+ * The bonding curve uses the formula: price = K / (supply²)
  * Where:
  * - K is a constant that determines curve steepness
- * - supply is the current token supply in the pair
+ * - supply is the current token reserve in the pair
  * 
  * Key mechanics:
- * 1. Price increases as supply decreases (buying)
- * 2. Price decreases as supply increases (selling)
- * 3. Asset token reserves are determined by assetRate
+ * 1. Price increases quadratically as supply decreases (buying)
+ * 2. Price decreases quadratically as supply increases (selling)
+ * 3. Square root calculations determine output amounts
  * 4. Graduation threshold triggers when reserve ratio hits target
  * 
  * Example:
  * - K = 1e18, supply = 1e6 tokens
- * - Initial price = 1e18 / 1e6 = 1e12 asset tokens per token
- * - After buying 1e5 tokens:
- *   New price = 1e18 / 9e5 ≈ 1.11e12 (11% increase)
+ * - Initial price = 1e18 / (1e6)² = 1e6 asset tokens per token
+ * - After buying to reduce supply to 9e5:
+ *   New price = 1e18 / (9e5)² ≈ 1.23e6 (23% increase)
+ * 
+ * Buy formula: newReserveAgent = sqrt(K / newReserveAsset)
+ * Sell formula: newReserveAsset = K / (newReserveAgent²)
  */
 contract BondingPair is ReentrancyGuard {
     using SafeERC20 for IERC20;
-
-    /*//////////////////////////////////////////////////////////////
-                                CONSTANTS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Basis points denominator for percentage calculations (100%)
-    uint256 private constant BASIS_POINTS = 100_000;
-
-    /// @notice Minimum amount for token operations to prevent dust
-    uint256 private constant MINIMUM_AMOUNT = 1000;
-
-    /// @notice Reserve ratio below which graduation is triggered
-    uint256 private constant GRADUATION_THRESHOLD = 20_000; // 20%
 
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
@@ -51,9 +42,6 @@ contract BondingPair is ReentrancyGuard {
 
     /// @notice The bonding curve constant K
     uint256 public immutable K;
-
-    /// @notice The asset token rate in basis points
-    uint64 public immutable assetRate;
 
     /// @notice The factory that created this pair
     address public immutable factory;
@@ -73,9 +61,6 @@ contract BondingPair is ReentrancyGuard {
     /// @notice Reserve of asset tokens
     uint256 private reserveAsset;
 
-    /// @notice Flag indicating if graduation threshold has been met
-    bool public isGraduated;
-
     /// @notice Block timestamp of last swap
     uint32 private blockTimestampLast;
 
@@ -89,12 +74,6 @@ contract BondingPair is ReentrancyGuard {
      * @param reserveAsset New asset token reserve
      */
     event ReservesUpdated(uint256 reserveAgent, uint256 reserveAsset);
-
-    /**
-     * @notice Emitted when graduation threshold is met
-     * @param reserveRatio Final reserve ratio at graduation
-     */
-    event GraduationTriggered(uint256 reserveRatio);
 
     /**
      * @notice Emitted when tokens are swapped
@@ -132,27 +111,23 @@ contract BondingPair is ReentrancyGuard {
      * @param agentToken_ Agent token address
      * @param assetToken_ Asset token address
      * @param k_ Bonding curve constant
-     * @param assetRate_ Required asset token rate
      */
     constructor(
         address router_,
         address agentToken_,
         address assetToken_,
-        uint256 k_,
-        uint64 assetRate_
+        uint256 k_
     ) {
         require(router_ != address(0), "Invalid router");
         require(agentToken_ != address(0), "Invalid agent token");
         require(assetToken_ != address(0), "Invalid asset token");
         require(k_ > 0, "Invalid K");
-        require(assetRate_ > 0 && assetRate_ <= BASIS_POINTS, "Invalid asset rate");
 
         factory = msg.sender;
         router = router_;
         agentToken = agentToken_;
         assetToken = assetToken_;
         K = k_;
-        assetRate = assetRate_;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -176,26 +151,14 @@ contract BondingPair is ReentrancyGuard {
         uint256 agentAmountOut,
         uint256 assetAmountOut
     ) external nonReentrant onlyRouter {
-        require(!isGraduated, "Already graduated");
+        require(!IToken(agentToken).hasGraduated(), "Already graduated");
         require(
             (agentAmountIn > 0 && assetAmountOut > 0) || 
             (assetAmountIn > 0 && agentAmountOut > 0),
             "Invalid amounts"
         );
 
-        // Calculate amounts based on bonding curve
-        if (agentAmountIn > 0) {
-            // Selling agent tokens
-            uint256 actualAssetOut = _getAssetAmountOut(agentAmountIn);
-            require(actualAssetOut >= assetAmountOut, "Insufficient output");
-            _updateReserves(
-                reserveAgent + agentAmountIn,
-                reserveAsset - actualAssetOut
-            );
-            assetAmountOut = actualAssetOut;
-            agentAmountOut = 0;
-        } else {
-            // Buying agent tokens
+        if (assetAmountIn > 0) {
             uint256 actualAgentOut = _getAgentAmountOut(assetAmountIn);
             require(actualAgentOut >= agentAmountOut, "Insufficient output");
             _updateReserves(
@@ -204,6 +167,16 @@ contract BondingPair is ReentrancyGuard {
             );
             agentAmountOut = actualAgentOut;
             assetAmountOut = 0;
+        } else {
+            // Selling agent tokens  
+            uint256 actualAssetOut = _getAssetAmountOut(agentAmountIn);
+            require(actualAssetOut >= assetAmountOut, "Insufficient output");
+            _updateReserves(
+                reserveAgent + agentAmountIn,
+                reserveAsset - actualAssetOut
+            );
+            agentAmountOut = 0;
+            assetAmountOut = actualAssetOut;
         }
 
         emit Swap(
@@ -213,14 +186,15 @@ contract BondingPair is ReentrancyGuard {
             agentAmountOut,
             assetAmountOut
         );
+    }
 
-        // Check graduation threshold
-        uint256 reserveRatio = (reserveAgent * BASIS_POINTS) / IERC20(agentToken).totalSupply();
-        if (reserveRatio <= GRADUATION_THRESHOLD) {
-            isGraduated = true;
-            emit GraduationTriggered(reserveRatio);
-            revert("GraduationRequired");
-        }
+    /**
+     * @notice Synchronizes reserves with current balances
+     */
+    function sync() external nonReentrant onlyRouter {
+        uint256 agentBalance_ = IERC20(agentToken).balanceOf(address(this));
+        uint256 assetBalance_ = IERC20(assetToken).balanceOf(address(this));
+        _updateReserves(agentBalance_, assetBalance_);
     }
 
     /**
@@ -262,7 +236,7 @@ contract BondingPair is ReentrancyGuard {
             token == agentToken || token == assetToken,
             "Invalid token"
         );
-        IERC20(token).safeApprove(spender, amount);
+        IERC20(token).forceApprove(spender, amount);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -281,20 +255,6 @@ contract BondingPair is ReentrancyGuard {
         uint32
     ) {
         return (reserveAgent, reserveAsset, blockTimestampLast);
-    }
-
-    /**
-     * @notice Returns amount of agent tokens held by pair
-     */
-    function balance() external view returns (uint256) {
-        return IERC20(agentToken).balanceOf(address(this));
-    }
-
-    /**
-     * @notice Returns amount of asset tokens held by pair
-     */
-    function assetBalance() external view returns (uint256) {
-        return IERC20(assetToken).balanceOf(address(this));
     }
 
     /**
@@ -332,12 +292,6 @@ contract BondingPair is ReentrancyGuard {
         uint256 newReserveAgent,
         uint256 newReserveAsset
     ) private {
-        require(
-            newReserveAgent > MINIMUM_AMOUNT &&
-            newReserveAsset > MINIMUM_AMOUNT,
-            "Below minimum"
-        );
-
         reserveAgent = newReserveAgent;
         reserveAsset = newReserveAsset;
         blockTimestampLast = uint32(block.timestamp);
@@ -350,11 +304,14 @@ contract BondingPair is ReentrancyGuard {
      * @param assetAmountIn Amount of asset tokens to spend
      * @return Amount of agent tokens received
      */
-    function _getAgentAmountOut(
-        uint256 assetAmountIn
-    ) private view returns (uint256) {
-        uint256 newReserveAsset = reserveAsset + assetAmountIn;
-        uint256 newReserveAgent = (K * BASIS_POINTS) / (assetRate * newReserveAsset);
+    function _getAgentAmountOut(uint256 assetAmountIn) private view returns (uint256) {
+        if (reserveAsset == 0) {
+            // Initial purchase - special case
+            uint256 output = (assetAmountIn * reserveAgent) / (K * 1e18);
+            return output;
+        }
+        
+        uint256 newReserveAgent = (reserveAgent * reserveAsset) / (reserveAsset + assetAmountIn);
         return reserveAgent - newReserveAgent;
     }
 
@@ -363,11 +320,10 @@ contract BondingPair is ReentrancyGuard {
      * @param agentAmountIn Amount of agent tokens to sell
      * @return Amount of asset tokens received
      */
-    function _getAssetAmountOut(
-        uint256 agentAmountIn
-    ) private view returns (uint256) {
-        uint256 newReserveAgent = reserveAgent + agentAmountIn;
-        uint256 newReserveAsset = (K * BASIS_POINTS) / (assetRate * newReserveAgent);
+    function _getAssetAmountOut(uint256 agentAmountIn) private view returns (uint256) {
+        uint256 scaledK = (K * 1e18) / (reserveAgent + agentAmountIn);
+        uint256 newReserveAsset = (reserveAsset * scaledK) / reserveAgent;
+    
         return reserveAsset - newReserveAsset;
     }
 }

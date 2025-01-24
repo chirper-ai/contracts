@@ -1,157 +1,221 @@
 // test/Factory.test.ts
 import { ethers } from "hardhat";
-import { expect, loadFixture, deployFixture } from "./helper";
+import { expect, loadFixture, deployFixture } from "./setup";
+import type { TestContext } from "./setup";
 import { Contract } from "ethers";
-import type { TestContext } from "./helper";
 
-describe("Factory", function() {
+describe("Factory", function () {
   let context: TestContext;
 
-  beforeEach(async function() {
+  beforeEach(async function () {
     context = await loadFixture(deployFixture);
   });
 
-  describe("Initialization", function() {
-    it("should set correct initial values", async function() {
-      const { factory, owner } = context;
-      
-      expect(await factory.taxVault()).to.equal(await owner.getAddress());
-      expect(Number(await factory.buyTax())).to.equal(2_000);
-      expect(Number(await factory.sellTax())).to.equal(3_000);
-      expect(Number(await factory.launchTax())).to.equal(5_000);
+  describe("Initialization", function () {
+    it("should set correct initial values", async function () {
+      const { factory, router, taxVault } = context;
+
+      expect(await factory.router()).to.equal(await router.getAddress());
+      expect(await factory.taxVault()).to.equal(
+        await taxVault.getAddress()
+      );
+      expect(Number(await factory.initialSupply())).to.equal(
+        Number(ethers.parseEther("1000000000"))
+      );
+      expect(await factory.K()).to.equal(250n);
     });
 
-    it("should grant DEFAULT_ADMIN_ROLE to deployer", async function() {
+    it("should grant ADMIN_ROLE to deployer", async function () {
       const { factory, owner } = context;
-      const DEFAULT_ADMIN_ROLE = await factory.DEFAULT_ADMIN_ROLE();
-      
-      expect(await factory.hasRole(DEFAULT_ADMIN_ROLE, await owner.getAddress())).to.be.true;
+      const ADMIN_ROLE = await factory.ADMIN_ROLE();
+
+      expect(await factory.hasRole(ADMIN_ROLE, await owner.getAddress())).to.be
+        .true;
     });
   });
 
-  describe("Pair Creation", function() {
-    it("should create new pair correctly", async function() {
-      const { factory, assetToken, alice } = context;
-      
-      // Deploy a mock agent token
-      const Token = await ethers.getContractFactory("Token");
-      const agentToken = await Token.deploy(
-        "Test Agent",
-        "TEST",
-        "1000000",
-        await alice.getAddress(),  // manager address
-        1_000,
-        1_000,
-        alice.getAddress()
-      );
-      await agentToken.waitForDeployment();
+  describe("Token Launch", function () {
+    it("should launch new token correctly", async function () {
+      const { factory, alice, assetToken, uniswapV2Router } = context;
 
-      // Create pair
-      const CREATOR_ROLE = await factory.CREATOR_ROLE();
-      await factory.grantRole(CREATOR_ROLE, await alice.getAddress());
-      
-      const agentTokenAddress = await agentToken.getAddress();
-      const assetTokenAddress = await assetToken.getAddress();
-      
-      // Create pair and check
-      const tx = await factory.connect(alice).createPair(agentTokenAddress, assetTokenAddress);
+      const dexConfig = [
+        {
+          router: await uniswapV2Router.getAddress(),
+          fee: 3_000,
+          weight: 100_000,
+          dexType: 0, // UniswapV2
+        },
+      ];
+
+      // approve
+      await assetToken
+        .connect(alice)
+        .approve(await factory.getAddress(), ethers.parseEther("10"));
+
+      const tx = await factory
+        .connect(alice)
+        .launch(
+          "Test Agent",
+          "TEST",
+          "https://test.com",
+          "Test intention",
+          ethers.parseEther("10"),
+          dexConfig
+        );
+
       const receipt = await tx.wait();
-      
-      // Get pair address and verify it exists
-      const pairAddress = await factory.getPair(agentTokenAddress, assetTokenAddress);
-      expect(pairAddress).to.not.equal(ethers.ZeroAddress);
+      const event = receipt?.logs.find(
+        (log) => log.fragment?.name === "Launch"
+      );
+
+      expect(event).to.not.be.undefined;
+      expect(event?.args?.token).to.not.equal(ethers.ZeroAddress);
+      expect(event?.args?.pair).to.not.equal(ethers.ZeroAddress);
+      expect(event?.args?.creator).to.equal(await alice.getAddress());
+      expect(event?.args?.name).to.equal("Test Agent");
+      expect(event?.args?.symbol).to.equal("TEST");
     });
 
-    it("should revert when creating duplicate pair", async function() {
-      const { factory, assetToken, alice } = context;
-      
-      const Token = await ethers.getContractFactory("Token");
-      const agentToken = await Token.deploy(
-        "Test Agent",
-        "TEST",
-        "1000000",
-        await factory.getAddress(),
-        100,
-        100,
-        alice.getAddress()
-      );
-      await agentToken.waitForDeployment();
+    it("should verify pair creation and bonding curve parameters", async function () {
+      const { factory, alice, uniswapV2Router, assetToken } = context;
 
-      const CREATOR_ROLE = await factory.CREATOR_ROLE();
-      await factory.grantRole(CREATOR_ROLE, await alice.getAddress());
-      
-      const agentTokenAddress = await agentToken.getAddress();
-      const assetTokenAddress = await assetToken.getAddress();
-      
-      // First creation should succeed
-      await factory.connect(alice).createPair(agentTokenAddress, assetTokenAddress);
-      
-      // Second creation should fail
+      const dexConfig = [
+        {
+          router: await uniswapV2Router.getAddress(),
+          fee: 3000,
+          weight: 100_000,
+          dexType: 0,
+        },
+      ];
+
+      // approve
+      await assetToken
+        .connect(alice)
+        .approve(await factory.getAddress(), ethers.parseEther("10"));
+
+      const tx = await factory
+        .connect(alice)
+        .launch(
+          "Test Agent",
+          "TEST",
+          "Test intention",
+          "https://test.com",
+          ethers.parseEther("10"),
+          dexConfig
+        );
+
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find(
+        (log) => log.fragment?.name === "Launch"
+      );
+      const token = event?.args?.token;
+      const pair = event?.args?.pair;
+
+      // Verify pair exists
+      expect(
+        await factory.getPair(token, await assetToken.getAddress())
+      ).to.equal(pair);
+
+      // Verify bonding pair parameters
+      const BondingPair = await ethers.getContractFactory("BondingPair");
+      const bondingPair = BondingPair.attach(pair);
+
+      expect(await bondingPair.K()).to.equal(await factory.K());
+      expect(await bondingPair.router()).to.equal(await factory.router());
+    });
+
+    it("should not launch with invalid parameters", async function () {
+      const { factory, alice, assetToken, uniswapV2Router } = context;
+
+      const dexConfig = [
+        {
+          router: await uniswapV2Router.getAddress(),
+          fee: 3000,
+          weight: 50_000, // Invalid weight (not 100%)
+          dexType: 0,
+        },
+      ];
+
+      // approve
+      await assetToken
+        .connect(alice)
+        .approve(await factory.getAddress(), ethers.parseEther("10"));
+
       let failed = false;
       try {
-        await factory.connect(alice).createPair(agentTokenAddress, assetTokenAddress);
-      } catch (error) {
+        await factory
+          .connect(alice)
+          .launch(
+            "Test Agent",
+            "TEST",
+            "Test intention",
+            "https://test.com",
+            ethers.parseEther("10"),
+            dexConfig
+          );
+      } catch (e) {
         failed = true;
       }
       expect(failed).to.be.true;
     });
   });
 
-  describe("Admin Functions", function() {
-    it("should update tax parameters correctly", async function() {
-      const { factory, alice } = context;
-      
-      const newTaxVault = await alice.getAddress();
-      const newBuyTax = 250;
-      const newSellTax = 350;
-      const newLaunchTax = 600;
+  describe("Admin Functions", function () {
+    it("should update bonding curve parameters correctly", async function () {
+      const { factory } = context;
 
-      await factory.setTaxParameters(newBuyTax, newSellTax, newLaunchTax, newTaxVault);
+      const newK = ethers.parseEther("2");
 
-      expect(await factory.taxVault()).to.equal(newTaxVault);
-      expect(Number(await factory.buyTax())).to.equal(newBuyTax);
-      expect(Number(await factory.sellTax())).to.equal(newSellTax);
-      expect(Number(await factory.launchTax())).to.equal(newLaunchTax);
+      await factory.setK(newK);
+
+      expect(await factory.K()).to.equal(newK);
     });
 
-    it("should revert tax parameter updates from non-admin", async function() {
+    it("should update initial supply correctly", async function () {
+      const { factory } = context;
+
+      const newSupply = 2_000_000;
+      await factory.setInitialSupply(newSupply);
+      expect(Number(await factory.initialSupply())).to.equal(Number(newSupply));
+    });
+
+    it("should not allow parameter updates from non-admin", async function () {
       const { factory, alice } = context;
-      
+
       let failed = false;
       try {
-        await factory.connect(alice).setTaxParameters(250, 350, 600, await alice.getAddress());
-      } catch (error) {
+        await factory.connect(alice).setK(ethers.parseEther("2"));
+      } catch (e) {
+        failed = true;
+      }
+      expect(failed).to.be.true;
+
+      failed = false;
+      try {
+        await factory.connect(alice).setInitialSupply(2_000_000);
+      } catch (e) {
         failed = true;
       }
       expect(failed).to.be.true;
     });
 
-    it("should set router address correctly", async function() {
-      const { factory, alice } = context;
-      
-      await factory.setRouter(await alice.getAddress());
-      expect(await factory.router()).to.equal(await alice.getAddress());
-    });
+    it("should not allow setting invalid parameters", async function () {
+      const { factory } = context;
 
-    it("should revert router update from non-admin", async function() {
-      const { factory, alice } = context;
-      
+      // Invalid K (zero)
       let failed = false;
       try {
-        await factory.connect(alice).setRouter(await alice.getAddress());
-      } catch (error) {
+        await factory.setK(0);
+      } catch (e) {
         failed = true;
       }
       expect(failed).to.be.true;
-    });
 
-    it("should revert when setting invalid tax values", async function() {
-      const { factory, owner } = context;
-      
-      let failed = false;
+      // Invalid initial supply (zero)
+      failed = false;
       try {
-        await factory.setTaxParameters(10001, 300, 500, await owner.getAddress());
-      } catch (error) {
+        await factory.setInitialSupply(0);
+      } catch (e) {
         failed = true;
       }
       expect(failed).to.be.true;

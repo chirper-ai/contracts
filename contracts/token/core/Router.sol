@@ -7,9 +7,10 @@ import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import "../interfaces/IBondingPair.sol";
-import "../interfaces/IFactory.sol";
 import "../interfaces/IToken.sol";
+import "../interfaces/IFactory.sol";
+import "../interfaces/IManager.sol";
+import "../interfaces/IBondingPair.sol";
 
 /**
  * @title Router
@@ -37,6 +38,9 @@ contract Router is
     /// @notice Role identifier for administrative operations
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
 
+    /// @notice Basis points denominator for percentage calculations
+    uint256 private constant BASIS_POINTS = 100_000;
+
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
@@ -46,6 +50,9 @@ contract Router is
 
     /// @notice Asset token used for trading pairs
     address public assetToken;
+
+    /// @notice Maximum percentage of total supply that can be held by a single address
+    uint256 public maxHold;
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -59,6 +66,9 @@ contract Router is
         uint256 amountOut,
         bool isBuy
     );
+
+    /// @notice Emitted when max hold percentage is updated
+    event MaxHoldUpdated(uint256 maxHold);
 
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
@@ -80,7 +90,8 @@ contract Router is
      */
     function initialize(
         address factory_,
-        address assetToken_
+        address assetToken_,
+        uint256 maxHold_
     ) external initializer {
         __AccessControl_init();
         __ReentrancyGuard_init();
@@ -93,6 +104,7 @@ contract Router is
 
         factory = IFactory(factory_);
         assetToken = assetToken_;
+        maxHold = maxHold_;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -238,6 +250,69 @@ contract Router is
     }
 
     /*//////////////////////////////////////////////////////////////
+                            ADMIN FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice adds initial liquidity to a bonding pair
+     * @param agentToken_ Address of the agent token
+     * @param assetToken_ Address of the asset token
+     * @param amountAgentIn Amount of agent tokens being sold
+     * @param amountAssetIn Amount of asset tokens being spent
+     */
+    function addInitialLiquidity(
+        address agentToken_,
+        address assetToken_,
+        uint256 amountAgentIn,
+        uint256 amountAssetIn
+    ) external nonReentrant returns (uint liquidity) {
+        require(msg.sender == address(factory), "only factory");
+        require(assetToken == assetToken_, "invalid asset token");
+        
+        address pair = factory.getPair(agentToken_, assetToken_);
+        require(pair != address(0), "pair doesn't exist");
+        
+        IBondingPair bondingPair = IBondingPair(pair);
+        (uint256 agentReserve,,) = bondingPair.getReserves();
+        require(agentReserve == 0, "already initialized");
+
+        if(amountAgentIn > 0) {
+            IERC20(agentToken_).safeTransferFrom(msg.sender, pair, amountAgentIn);
+
+            // sync
+            bondingPair.sync();
+        }
+        if(amountAssetIn > 0) {
+            // Perform initial purchase
+            bondingPair.swap(0, amountAssetIn, 0, 0);
+            bondingPair.transferTo(msg.sender, amountAgentIn);
+            emit Swap(msg.sender, agentToken_, amountAssetIn, amountAgentIn, true);
+        }
+
+        return liquidity;
+    }
+
+    /**
+     * @notice transfers liquidity to manager
+     * @param token Address of the agent token
+     * @param tokenAmount Amount of agent tokens to transfer
+     * @param assetAmount Amount of asset tokens to transfer
+     */
+    function transferLiquidityToManager(
+        address token,
+        uint256 tokenAmount,
+        uint256 assetAmount
+    ) external nonReentrant {
+        require(msg.sender == factory.manager(), "Only manager");
+        address pair = factory.getPair(token, assetToken);
+        require(pair != address(0), "Pair not found");
+        
+        // Transfer tokens to manager
+        IBondingPair(pair).transferTo(msg.sender, tokenAmount);
+        IBondingPair(pair).transferAsset(msg.sender, assetAmount);
+    }
+
+    /*//////////////////////////////////////////////////////////////
                          INTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
@@ -248,6 +323,33 @@ contract Router is
      */
     function _isAgentToken(address token) internal view returns (bool) {
         return factory.getPair(token, assetToken) != address(0);
+    }
+
+    /**
+     * @notice Checks if a transfer would exceed max holding limit
+     * @param agentToken Token to check
+     * @param to Recipient address
+     * @param amount Amount being transferred
+     */
+    function _checkMaxHold(
+        address pair,
+        address agentToken,
+        address to,
+        uint256 amount
+    ) internal view {
+        if (to == address(0) || to == address(this)) return;
+        
+        IERC20 token = IERC20(agentToken);
+
+        // Get total supply
+        uint256 totalSupply_ = token.totalSupply();
+        
+        // Skip if first buy (pair holds all tokens)
+        if (token.balanceOf(pair) == totalSupply_) return;
+        
+        uint256 newBalance = token.balanceOf(to) + amount;
+        uint256 maxHoldAmount = (totalSupply_ / BASIS_POINTS) * maxHold;
+        require(newBalance <= maxHoldAmount, "Exceeds max holding");
     }
 
     /**
@@ -267,25 +369,24 @@ contract Router is
         // Get bonding pair
         address pair = factory.getPair(agentToken, assetToken);
         require(pair != address(0), "Pair not found");
+
+        // quote
+        uint256 quote = IBondingPair(pair).getAssetAmountOut(amountIn);
+        require(quote >= amountOutMin, "Insufficient output");
         
-        try IBondingPair(pair).getAssetAmountOut(amountIn) returns (uint256 quote) {
-            require(quote >= amountOutMin, "Insufficient output");
-            
-            // Transfer tokens to pair
-            IERC20(agentToken).safeTransferFrom(msg.sender, pair, amountIn);
-            
-            // Execute swap
-            IBondingPair(pair).swap(amountIn, 0, 0, quote);
-            IBondingPair(pair).transferAsset(to, quote);
-            
-            emit Swap(msg.sender, agentToken, amountIn, quote, false);
-            return quote;
-        } catch Error(string memory reason) {
-            if (keccak256(bytes(reason)) == keccak256(bytes("GraduationRequired"))) {
-                revert("Token graduating");
-            }
-            revert(reason);
-        }
+        // Transfer tokens to pair
+        IERC20(agentToken).safeTransferFrom(msg.sender, pair, amountIn);
+        
+        // Execute swap
+        IBondingPair(pair).swap(amountIn, 0, 0, quote);
+        IBondingPair(pair).transferAsset(to, quote);
+
+        // check graduation
+        _checkGraduation(agentToken);
+
+        // emit swap
+        emit Swap(msg.sender, agentToken, amountIn, quote, false);
+        return quote;
     }
 
     /**
@@ -305,25 +406,27 @@ contract Router is
         // Get bonding pair
         address pair = factory.getPair(agentToken, assetToken);
         require(pair != address(0), "Pair not found");
+
+        // quote
+        uint256 quote = IBondingPair(pair).getAgentAmountOut(amountIn);
+        require(quote >= amountOutMin, "Insufficient output");
+
+        // check holding
+        _checkMaxHold(pair, agentToken, to, quote);
         
-        try IBondingPair(pair).getAgentAmountOut(amountIn) returns (uint256 quote) {
-            require(quote >= amountOutMin, "Insufficient output");
-            
-            // Transfer tokens to pair
-            IERC20(assetToken).safeTransferFrom(msg.sender, pair, amountIn);
-            
-            // Execute swap
-            IBondingPair(pair).swap(0, amountIn, quote, 0);
-            IBondingPair(pair).transferTo(to, quote);
-            
-            emit Swap(msg.sender, agentToken, amountIn, quote, true);
-            return quote;
-        } catch Error(string memory reason) {
-            if (keccak256(bytes(reason)) == keccak256(bytes("GraduationRequired"))) {
-                revert("Token graduating");
-            }
-            revert(reason);
-        }
+        // Transfer tokens to pair
+        IERC20(assetToken).safeTransferFrom(msg.sender, pair, amountIn);
+        
+        // Execute swap
+        IBondingPair(pair).swap(0, amountIn, quote, 0);
+        IBondingPair(pair).transferTo(to, quote);
+
+        // check graduation
+        _checkGraduation(agentToken);
+
+        // emit swap
+        emit Swap(msg.sender, agentToken, amountIn, quote, true);
+        return quote;
     }
 
     /**
@@ -348,22 +451,17 @@ contract Router is
         amountIn = _getAgentIn(agentToken, amountOut);
         require(amountIn <= amountInMax, "Excessive input required");
 
-        try {
-            // Transfer tokens to pair
-            IERC20(agentToken).safeTransferFrom(msg.sender, pair, amountIn);
-            
-            // Execute swap
-            IBondingPair(pair).swap(amountIn, 0, 0, amountOut);
-            IBondingPair(pair).transferAsset(to, amountOut);
-            
-            emit Swap(msg.sender, agentToken, amountIn, amountOut, false);
-            return amountIn;
-        } catch Error(string memory reason) {
-            if (keccak256(bytes(reason)) == keccak256(bytes("GraduationRequired"))) {
-                revert("Token graduating");
-            }
-            revert(reason);
-        }
+        // Transfer tokens to pair
+        IERC20(agentToken).safeTransferFrom(msg.sender, pair, amountIn);
+        IBondingPair(pair).swap(amountIn, 0, 0, amountOut);
+        IBondingPair(pair).transferAsset(to, amountOut);
+
+        // check graduation
+        _checkGraduation(agentToken);
+
+        // emit swap
+        emit Swap(msg.sender, agentToken, amountIn, amountOut, false);
+        return amountIn;
     }
 
     /**
@@ -388,22 +486,22 @@ contract Router is
         amountIn = _getAssetIn(agentToken, amountOut);
         require(amountIn <= amountInMax, "Excessive input required");
 
-        try {
-            // Transfer tokens to pair
-            IERC20(assetToken).safeTransferFrom(msg.sender, pair, amountIn);
-            
-            // Execute swap
-            IBondingPair(pair).swap(0, amountIn, amountOut, 0);
-            IBondingPair(pair).transferTo(to, amountOut);
-            
-            emit Swap(msg.sender, agentToken, amountIn, amountOut, true);
-            return amountIn;
-        } catch Error(string memory reason) {
-            if (keccak256(bytes(reason)) == keccak256(bytes("GraduationRequired"))) {
-                revert("Token graduating");
-            }
-            revert(reason);
-        }
+        // check holding
+        _checkMaxHold(pair, agentToken, to, amountOut);
+
+        // Transfer tokens to pair
+        IERC20(assetToken).safeTransferFrom(msg.sender, pair, amountIn);
+
+        // Execute swap
+        IBondingPair(pair).swap(0, amountIn, amountOut, 0);
+        IBondingPair(pair).transferTo(to, amountOut);
+
+        // check graduation
+        _checkGraduation(agentToken);
+        
+        // emit swap
+        emit Swap(msg.sender, agentToken, amountIn, amountOut, true);
+        return amountIn;
     }
 
     /**
@@ -448,5 +546,42 @@ contract Router is
     ) internal view returns (uint256) {
         address pair = factory.getPair(agentToken, assetToken);
         return IBondingPair(pair).getAssetAmountOut(amountIn);
+    }
+
+    /**
+     * @notice Graduates a token
+     * @param agentToken Token to graduate
+     */
+    function _checkGraduation(address agentToken) internal {
+        // get manager from factory
+        IManager manager = IManager(factory.manager());
+
+        // should graduate
+        (bool shouldGraduate,) = manager.checkGraduation(agentToken);
+
+        // check graduation
+        if (shouldGraduate) {
+            // graduate
+            manager.graduate(agentToken);
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            ADMIN FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Updates maximum hold percentage
+     * @param maxHold_ New maximum hold percentage
+     */
+    function setMaxHold(
+        uint256 maxHold_
+    ) external onlyRole(ADMIN_ROLE) {
+        require(
+            maxHold_ > 0 && maxHold_ <= BASIS_POINTS,
+            "Invalid max hold percentage"
+        );
+        maxHold = maxHold_;
+        emit MaxHoldUpdated(maxHold_);
     }
 }
