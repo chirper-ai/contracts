@@ -13,11 +13,11 @@ describe("Factory", function () {
 
   describe("Initialization", function () {
     it("should set correct initial values", async function () {
-      const { factory, router, taxVault } = context;
+      const { factory, router, owner } = context;
 
       expect(await factory.router()).to.equal(await router.getAddress());
-      expect(await factory.taxVault()).to.equal(
-        await taxVault.getAddress()
+      expect(await factory.platformTreasury()).to.equal(
+        await owner.getAddress()
       );
       expect(Number(await factory.initialSupply())).to.equal(
         Number(ethers.parseEther("1000000000"))

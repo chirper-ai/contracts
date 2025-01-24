@@ -10,7 +10,6 @@ import "./BondingPair.sol";
 import "./Token.sol";
 import "../interfaces/IRouter.sol";
 import "../interfaces/IManager.sol";
-import "../interfaces/ITaxVault.sol";
 
 /**
  * @title Factory
@@ -69,9 +68,6 @@ contract Factory is
 
     /// @notice Manager contract for managing AI agent tokens
     IManager public manager;
-
-    /// @notice Tax vault for platform fee collection
-    ITaxVault public taxVault;
 
     /// @notice platform treasury address
     address public platformTreasury;
@@ -215,7 +211,6 @@ contract Factory is
         
         // register agent with manager
         manager.registerAgent(token, pair, url, intention, dexConfigs);
-        taxVault.registerAgent(token, msg.sender, platformTreasury);
 
         // add initial liquidity
         router.addInitialLiquidity(
@@ -278,7 +273,10 @@ contract Factory is
             url,
             intention,
             address(manager),
-            address(taxVault)
+
+            // tax vaults
+            msg.sender,
+            platformTreasury
         );
         token = address(newToken);
 
@@ -354,14 +352,6 @@ contract Factory is
     function setInitialSupply(uint256 newSupply) external onlyRole(ADMIN_ROLE) {
         require(newSupply > 0, "Invalid supply");
         initialSupply = newSupply;
-    }
-
-    /**
-     * @notice Updates the platform tax vault address
-     * @param newTaxVault New tax vault address
-     */
-    function setTaxVault(address newTaxVault) external onlyRole(ADMIN_ROLE) {
-        taxVault = ITaxVault(newTaxVault);
     }
 
     /**

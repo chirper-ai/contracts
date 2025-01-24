@@ -43,7 +43,6 @@ export interface TestContext {
   factory: Contract;
   router: Contract;
   manager: Contract;
-  taxVault: Contract;
 
   // Token Contracts
   assetToken: Contract;
@@ -191,13 +190,6 @@ export async function deployFixture(): Promise<TestContext> {
     250, // K constant
   ]);
 
-  // Then Manager
-  const TaxVault = await ethers.getContractFactory("TaxVault");
-  const taxVault = await upgrades.deployProxy(TaxVault, [
-    await factory.getAddress(),
-    await assetToken.getAddress(),
-  ]);
-
   // Then Router
   const Router = await ethers.getContractFactory("Router");
   const router = await upgrades.deployProxy(Router, [
@@ -212,14 +204,12 @@ export async function deployFixture(): Promise<TestContext> {
     await factory.getAddress(),
     await assetToken.getAddress(),
     1_000, // graduation slippage
-    20_000, // graduation threshold
-    await taxVault.getAddress(),
+    20_000 // graduation threshold
   ]);
 
   // Set manager and router in factory
   await factory.connect(owner).setRouter(await router.getAddress());
   await factory.connect(owner).setManager(await manager.getAddress());
-  await factory.connect(owner).setTaxVault(await taxVault.getAddress());
 
   return {
     owner,
@@ -230,7 +220,6 @@ export async function deployFixture(): Promise<TestContext> {
     manager,
     assetToken,
     weth,
-    taxVault,
     uniswapV2Router,
     uniswapV2Factory,
     uniswapV3Router,

@@ -171,6 +171,60 @@ describe("Token", function () {
       const finalBalance = await token.balanceOf(await alice.getAddress());
       expect(finalBalance).to.equal(postPurchaseBalance);
     });
+
+    it("should correctly split buy tax between vaults", async function () {
+      const { router, bob, alice, assetToken } = context;
+      const assetAmountIn = ethers.parseEther("1");
+
+      // alice created the token
+      const initialBobBalance = await token.balanceOf(await bob.getAddress());
+      const initialAliceBalance = await token.balanceOf(await alice.getAddress());
+      const initialPlatformBalance = await token.balanceOf(await token.platformTreasury());
+      const initialOwnerVaultBalance = await token.balanceOf(await token.creatorTaxVault());
+
+      // bob has no tokens
+      expect(initialBobBalance).to.equal(0n);
+      expect(initialAliceBalance).to.equal(initialOwnerVaultBalance);
+      expect(await token.creatorTaxVault()).to.equal(await alice.getAddress());
+
+      // approve
+      await assetToken.connect(bob).approve(await router.getAddress(), assetAmountIn);
+
+      await router
+        .connect(bob)
+        .swapExactTokensForTokens(
+          assetAmountIn,
+          0,
+          [await assetToken.getAddress(), await token.getAddress()],
+          await bob.getAddress(),
+          ethers.MaxUint256
+        );
+
+      // post balances
+      const finalBobBalance = await token.balanceOf(await bob.getAddress());
+      const finalAliceBalance = await token.balanceOf(await alice.getAddress());
+      const finalPlatformBalance = await token.balanceOf(await token.platformTreasury());
+      const finalOwnerVaultBalance = await token.balanceOf(await token.creatorTaxVault());
+
+      // ensure tax was split correctly
+      const bobReceived = finalBobBalance - initialBobBalance;
+      const aliceReceived = finalAliceBalance - initialAliceBalance;
+      const platformReceived = finalPlatformBalance - initialPlatformBalance;
+      const ownerVaultReceived = finalOwnerVaultBalance - initialOwnerVaultBalance;
+
+      // expect
+      expect(platformReceived).to.equal(ownerVaultReceived);
+
+      // get total
+      const totalReceived = bobReceived + aliceReceived + platformReceived;
+
+      // make sure it's .5% of the total
+      const expectedTax = (BigInt(totalReceived) * BigInt(500)) / BigInt(100_000);
+
+      // expect
+      expect(platformReceived + ownerVaultReceived).to.equal(expectedTax);
+      
+    });
   });
 
   describe("Graduation", function () {

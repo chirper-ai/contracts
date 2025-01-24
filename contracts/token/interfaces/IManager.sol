@@ -112,6 +112,15 @@ interface IManager {
     /// @notice Returns a token's DEX pool addresses
     function getDexPools(address token) external view returns (address[] memory);
 
+    /**
+     * @notice Returns a token's bonding pair pool addresses
+     * @param token Token address
+     * @return address
+     */
+    function getBondingPair(
+        address token
+    ) external view returns (address);
+
     /// @notice Returns total number of registered tokens
     function tokenCount() external view returns (uint256);
 

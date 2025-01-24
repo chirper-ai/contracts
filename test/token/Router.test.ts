@@ -212,9 +212,7 @@ describe("Router", function () {
           ethers.MaxUint256
         );
 
-      expect(Number(await token.balanceOf(await alice.getAddress()))).to.equal(
-        0
-      );
+      expect(Number(await token.balanceOf(await alice.getAddress()))).to.be.lt(Number(agentBalance));
     });
 
     it("should enforce max hold in swapTokensForExactTokens", async function () {

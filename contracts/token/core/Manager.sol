@@ -113,9 +113,6 @@ contract Manager is
     /// @notice Factory contract reference
     IFactory public factory;
 
-    /// @notice Tax vault address for liquidity deployment
-    address public taxVault;
-
     /// @notice Asset token used for trading
     address public assetToken;
 
@@ -184,14 +181,12 @@ contract Manager is
      * @param assetToken_ Asset token address
      * @param gradSlippage_ Graduation slippage tolerance
      * @param gradThreshold_ Graduation reserve ratio threshold
-     * @param taxVault_ Tax vault address
      */
     function initialize(
         address factory_,
         address assetToken_,
         uint256 gradSlippage_,
-        uint256 gradThreshold_,
-        address taxVault_
+        uint256 gradThreshold_
     ) external initializer {
         __AccessControl_init();
         __ReentrancyGuard_init();
@@ -210,7 +205,6 @@ contract Manager is
         assetToken = assetToken_;
         gradSlippage = gradSlippage_;
         gradThreshold = gradThreshold_;
-        taxVault = taxVault_;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -383,6 +377,21 @@ contract Manager is
     }
 
     /**
+     * @notice Returns a token's bonding pair pool addresses
+     * @param token Token address
+     * @return address
+     */
+    function getBondingPair(
+        address token
+    ) external view returns (address) {
+        // get agent profile
+        AgentProfile storage info = agentProfile[token];
+
+        // return bonding pair
+        return info.bondingPair;
+    }
+
+    /**
      * @notice Returns total number of registered tokens
      * @return Token count
      */
@@ -417,16 +426,6 @@ contract Manager is
         uint256 gradThreshold_
     ) external onlyRole(ADMIN_ROLE) {
         gradThreshold = gradThreshold_;
-    }
-
-    /**
-     * @notice Sets the tax vault address for liquidity deployment
-     * @param taxVault_ Tax vault address
-     */
-    function setTaxVault(
-        address taxVault_
-    ) external onlyRole(ADMIN_ROLE) {
-        taxVault = taxVault_;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -471,7 +470,7 @@ contract Manager is
             assetAmount,
             minTokenAmount,
             minAssetAmount,
-            address(taxVault),
+            address(0),
             block.timestamp
         );
 
@@ -536,7 +535,7 @@ contract Manager is
                 amount1Desired: amount1,
                 amount0Min: 0,
                 amount1Min: 0,
-                recipient: address(taxVault),
+                recipient: address(this),
                 deadline: block.timestamp + 3600
             })
         );
@@ -585,7 +584,7 @@ contract Manager is
             assetAmount,
             minTokenAmount,
             minAssetAmount,
-            address(taxVault),
+            address(this),
             block.timestamp
         );
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "hardhat/console.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -8,6 +9,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 // interfaces
 import "../interfaces/IRouter.sol";
+import "../interfaces/IManager.sol";
 
 /**
  * @title Token
@@ -54,7 +56,10 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     uint256 public sellTax;
 
     /// @notice Address where tax is collected
-    address public immutable taxVault;
+    address public creatorTaxVault;
+
+    /// @notice Address where platform fees are collected
+    address public platformTreasury;
 
     /// @notice Manager contract that manages graduation
     address public immutable manager;
@@ -117,8 +122,9 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
      * @param initialSupply_ Initial supply in whole tokens
      * @param url_ Token URL for metadata
      * @param intention_ Token intention for metadata
-     * @param manager_ Router contract address
-     * @param taxVault_ Tax collection address
+     * @param manager_ Manager contract address
+     * @param creatorTaxVault_ Tax collection address
+     * @param platformTreasury_ Platform fee collection address
      * @dev Initial tax rates and transaction limits can be set by admin later
      */
     constructor(
@@ -128,16 +134,17 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
         string memory url_,
         string memory intention_,
         address manager_,
-        address taxVault_
+        address creatorTaxVault_,
+        address platformTreasury_
     ) ERC20(name_, symbol_) ERC20Permit(name_) Ownable(msg.sender) {
         require(manager_ != address(0), "Invalid manager");
-        require(taxVault_ != address(0), "Invalid tax vault");
         require(initialSupply_ > 0, "Invalid supply");
 
         url = url_;
         intention = intention_;
         manager = manager_;
-        taxVault = taxVault_;
+        creatorTaxVault = creatorTaxVault_;
+        platformTreasury = platformTreasury_;
 
         // Setup default parameters
         buyTax = 500;        // 0.5% default buy tax
@@ -239,6 +246,19 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
             return 0;
         }
 
+        // if not graduated
+        if (!hasGraduated) {
+            // pair address
+            address pair = IManager(manager).getBondingPair(address(this));
+
+            // check from
+            if (pair == from) {
+                return (amount * buyTax) / BASIS_POINTS;
+            } else if (pair == to) {
+                return (amount * sellTax) / BASIS_POINTS;
+            }
+        }
+
         // Apply appropriate tax based on transfer type
         if (isPool[from]) {
             return (amount * buyTax) / BASIS_POINTS;  // Buying
@@ -266,8 +286,10 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
         uint256 taxAmount = _calculateTax(from, to, amount);
         
         if (taxAmount > 0) {
-            // send tax to taxVault
-            super._update(from, taxVault, taxAmount);
+            // send half tax each to creatorTaxVault and platformTreasury
+            uint256 halfTax = taxAmount / 2;
+            super._update(from, creatorTaxVault, halfTax);
+            super._update(from, platformTreasury, taxAmount - halfTax);
             amount -= taxAmount;
         }
 
