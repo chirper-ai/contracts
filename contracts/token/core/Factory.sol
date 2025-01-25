@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import "./BondingPair.sol";
 import "./Token.sol";
+import "./AirDrop.sol";
 import "../interfaces/IRouter.sol";
 import "../interfaces/IManager.sol";
 
@@ -53,12 +54,34 @@ contract Factory is
     /// @notice Role identifier for administrative operations
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
 
+    /// @notice Basis points constant for percentage calculations
+    uint256 public constant BASIS_POINTS = 100_000;
+
+    /*//////////////////////////////////////////////////////////////
+                                 STRUCTS
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Optional airdrop parameters
+     * @param merkleRoot Root of merkle tree for airdrop claims
+     * @param claimantCount Number of addresses eligible for airdrop
+     * @param percentage Percentage of initial supply to airdrop (in basis points)
+     */
+    struct AirdropParams {
+        bytes32 merkleRoot;
+        uint256 claimantCount;
+        uint256 percentage;
+    }
+
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
     
     /// @notice Bidirectional mapping of token addresses to their trading pairs
     mapping(address => mapping(address => address)) public getPair;
+
+    /// @notice Mapping of token addresses to their airdrop contracts
+    mapping(address => address) public tokenToAirdrop;
 
     /// @notice Sequential list of all created pair addresses for enumeration
     address[] public allPairs;
@@ -97,14 +120,17 @@ contract Factory is
      * @param creator Address that initiated the launch
      * @param name Token name
      * @param symbol Token symbol
+     * @param airdrop Address of the airdrop contract (if created)
      */
     event Launch(
         address indexed token,
         address indexed pair,
         address indexed creator,
         string name,
-        string symbol
+        string symbol,
+        address airdrop
     );
+
 
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
@@ -193,7 +219,8 @@ contract Factory is
         string calldata url,
         string calldata intention,
         uint256 initialPurchase,
-        IManager.DexConfig[] calldata dexConfigs
+        IManager.DexConfig[] calldata dexConfigs,
+        AirdropParams calldata airdropParams
     ) external nonReentrant returns (address token, address pair) {
         address assetToken = router.assetToken();
         token = _createToken(name, symbol, url, intention);
@@ -202,6 +229,15 @@ contract Factory is
         // actual asset token
         IERC20 actualAgentToken = IERC20(token);
         IERC20 actualAssetToken = IERC20(assetToken);
+        
+        // Create airdrop if params provided
+        address airdrop = address(0);
+        uint256 airdropAmount = 0;
+        if (airdropParams.claimantCount > 0) {
+            (address airdrop_, uint256 airdropAmount_) = _createAirdrop(token, actualAgentToken, airdropParams);
+            airdrop = airdrop_;
+            airdropAmount = airdropAmount_;
+        }
         
         // Transfer initial tokens and ETH to pair
         actualAssetToken.transferFrom(msg.sender, address(this), initialPurchase);
@@ -216,7 +252,7 @@ contract Factory is
         router.addInitialLiquidity(
             token,
             assetToken,
-            initialSupply,
+            initialSupply - airdropAmount,
             0 // no purchase amount
         );
         
@@ -239,7 +275,7 @@ contract Factory is
         actualAssetToken.approve(address(router), type(uint256).max);
 
         // emit and return
-        emit Launch(token, pair, msg.sender, name, symbol);
+        emit Launch(token, pair, msg.sender, name, symbol, airdrop);
         return (token, pair);
     }
 
@@ -327,6 +363,37 @@ contract Factory is
         allPairs.push(pair);
         
         return pair;
+    }
+
+    /**
+     * @notice Creates a new airdrop contract for a token
+     * @param token Token address
+     * @param tokenContract Token contract interface
+     * @param params Airdrop parameters
+     */
+    function _createAirdrop(
+        address token,
+        IERC20 tokenContract,
+        AirdropParams calldata params
+    ) internal returns (address airdrop, uint256 airdropAmount) {
+        require(params.percentage > 0 && params.percentage <= 5_000, "Invalid percentage");
+        require(params.merkleRoot != bytes32(0), "Invalid merkle root");
+        
+        uint256 bondingAmount = (initialSupply * (BASIS_POINTS - params.percentage)) / BASIS_POINTS;
+        airdropAmount = initialSupply - bondingAmount;
+        
+        MerkleAirdrop newAirdrop = new MerkleAirdrop(
+            token,
+            params.merkleRoot,
+            params.claimantCount
+        );
+        
+        airdrop = address(newAirdrop);
+        tokenToAirdrop[token] = airdrop;
+        tokenContract.transfer(airdrop, airdropAmount);
+
+        // return airdrop address and amount
+        return (airdrop, airdropAmount);
     }
 
     /*//////////////////////////////////////////////////////////////
