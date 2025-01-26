@@ -393,18 +393,22 @@ contract Factory is
         IERC20 agentToken = IERC20(token);
         IERC20 actualAssetToken = IERC20(assetToken);
         
+        // Approve router for trading
         agentToken.approve(address(router), type(uint256).max);
         actualAssetToken.approve(address(router), initialPurchase);
         
         // Transfer initial tokens and ETH to pair
         actualAssetToken.transferFrom(msg.sender, address(this), initialPurchase);
         
+        // add initial liquidity
         router.addInitialLiquidity(token, assetToken, liquiditySupply, 0);
         
+        // create first purchase path
         address[] memory path = new address[](2);
         path[0] = assetToken;
         path[1] = token;
         
+        // do actual first purchase
         router.swapExactTokensForTokens(
             initialPurchase,
             0,

@@ -345,6 +345,7 @@ contract Router is
         // Get total supply
         uint256 totalSupply_ = token.totalSupply();
         
+        // Get new balance
         uint256 newBalance = token.balanceOf(to) + amount;
         uint256 maxHoldAmount = (totalSupply_ / BASIS_POINTS) * maxHold;
 
