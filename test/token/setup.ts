@@ -200,7 +200,7 @@ export async function deployFixture(): Promise<TestContext> {
   // Factory First
   const Factory = await ethers.getContractFactory("Factory");
   const factory = await upgrades.deployProxy(Factory, [
-    ethers.parseEther("1000000000"), // initial supply
+    ethers.parseEther("1000000000"), // 1B initial supply
     250, // K constant
   ]);
 

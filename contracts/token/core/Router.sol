@@ -327,7 +327,7 @@ contract Router is
 
     /**
      * @notice Checks if a transfer would exceed max holding limit
-     * @param agentToken Token to check
+     * @param pair Pair to check
      * @param to Recipient address
      * @param amount Amount being transferred
      */
@@ -338,17 +338,26 @@ contract Router is
         uint256 amount
     ) internal view {
         if (to == address(0) || to == address(this)) return;
-        
+
+        // token
         IERC20 token = IERC20(agentToken);
 
         // Get total supply
         uint256 totalSupply_ = token.totalSupply();
         
-        // Skip if first buy (pair holds all tokens)
-        if (token.balanceOf(pair) == totalSupply_) return;
-        
         uint256 newBalance = token.balanceOf(to) + amount;
         uint256 maxHoldAmount = (totalSupply_ / BASIS_POINTS) * maxHold;
+
+        // check max hold
+        if (newBalance > maxHoldAmount) {
+            // get asset token
+            IERC20 actualAssetToken = IERC20(assetToken);
+            
+            // Skip if first buy (pair holds all tokens)
+            if (actualAssetToken.balanceOf(pair) == 0) return;
+        }
+
+        // exceeds max holding
         require(newBalance <= maxHoldAmount, "Exceeds max holding");
     }
 
