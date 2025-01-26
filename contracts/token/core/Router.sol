@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -67,6 +68,15 @@ contract Router is
         bool isBuy
     );
 
+    /// @notice Emitted when metrics are updated
+    event Metrics(
+        address indexed agentToken,
+        uint256 price,
+        uint256 marketCap,
+        uint256 circulatingSupply,
+        uint256 liquidity
+    );
+
     /// @notice Emitted when max hold percentage is updated
     event MaxHoldUpdated(uint256 maxHold);
 
@@ -98,6 +108,8 @@ contract Router is
 
         require(factory_ != address(0), "Invalid factory");
         require(assetToken_ != address(0), "Invalid asset token");
+        //require(IERC20(assetToken_).decimals() == 18, "Asset token must have 18 decimals");
+
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(ADMIN_ROLE, msg.sender);
@@ -289,6 +301,9 @@ contract Router is
             emit Swap(msg.sender, agentToken_, amountAssetIn, amountAgentIn, true);
         }
 
+        // update metrics
+        _updateMetrics(pair, agentToken_);
+
         return liquidity;
     }
 
@@ -396,6 +411,11 @@ contract Router is
 
         // emit swap
         emit Swap(msg.sender, agentToken, amountIn, quote, false);
+
+        // update metrics
+        _updateMetrics(pair, agentToken);
+
+        // return quote
         return quote;
     }
 
@@ -436,6 +456,11 @@ contract Router is
 
         // emit swap
         emit Swap(msg.sender, agentToken, amountIn, quote, true);
+
+        // update metrics
+        _updateMetrics(pair, agentToken);
+
+        // return quote
         return quote;
     }
 
@@ -471,6 +496,11 @@ contract Router is
 
         // emit swap
         emit Swap(msg.sender, agentToken, amountIn, amountOut, false);
+
+        // update metrics
+        _updateMetrics(pair, agentToken);
+
+        // return amountIn
         return amountIn;
     }
 
@@ -511,6 +541,11 @@ contract Router is
         
         // emit swap
         emit Swap(msg.sender, agentToken, amountIn, amountOut, true);
+
+        // update metrics
+        _updateMetrics(pair, agentToken);
+
+        // retourn amountIn
         return amountIn;
     }
 
@@ -574,6 +609,39 @@ contract Router is
             // graduate
             manager.graduate(agentToken);
         }
+    }
+
+    /**
+     * @notice Updates token metrics
+     * @param pair Pair to update
+     * @param agentToken Token to update
+     */
+    function _updateMetrics(address pair, address agentToken) internal {
+        // Get pair reserves
+        (uint256 agentReserve, uint256 assetReserve, ) = IBondingPair(pair).getReserves();
+
+        // Get total supply
+        uint256 totalSupply = IERC20(agentToken).totalSupply();
+
+        // circulating supply
+        uint256 circulatingSupply = totalSupply - IERC20(agentToken).balanceOf(pair);
+
+        // Calculate price (assetReserve / agentReserve)
+        uint256 price = agentReserve > 0 ? IBondingPair(pair).getAssetAmountOut(1e18) : 0;
+
+        // Calculate market cap (circulatingSupply * price)
+        uint256 marketCap = (circulatingSupply * price) / 1e18;
+
+        // Calculate liquidity (2 * sqrt(agentReserve * assetReserve))
+        uint256 liquidity = 2 * Math.sqrt(agentReserve * assetReserve);
+
+        emit Metrics(
+            agentToken,
+            price,
+            marketCap,
+            circulatingSupply,
+            liquidity
+        );
     }
 
     /*//////////////////////////////////////////////////////////////
