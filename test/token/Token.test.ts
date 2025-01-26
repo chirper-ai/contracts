@@ -44,8 +44,8 @@ describe("Token", function () {
     });
 
     it("should set correct default parameters", async function () {
-      expect(await token.buyTax()).to.equal(500n);
-      expect(await token.sellTax()).to.equal(500n);
+      expect(await token.buyTax()).to.equal(1000n);
+      expect(await token.sellTax()).to.equal(1000n);
       expect(await token.isTaxExempt(await context.manager.getAddress())).to.be
         .true;
     });
@@ -71,7 +71,6 @@ describe("Token", function () {
 
       const agentReceived =
         (await token.balanceOf(await alice.getAddress())) - initialAgentBalance;
-      const expectedTax = (agentReceived * BigInt(500)) / BigInt(100000);
       expect(Number(agentReceived)).to.be.gt(0);
     });
 
@@ -129,9 +128,6 @@ describe("Token", function () {
       const { router, alice, bob, assetToken } = context;
       const assetAmountIn = ethers.parseEther("10");
 
-      // Get initial balance
-      const initialBalance = await token.balanceOf(await alice.getAddress());
-
       // Approve spending
       await token
         .connect(alice)
@@ -157,7 +153,7 @@ describe("Token", function () {
       );
 
       // Transfer half to Bob
-      const transferAmount = postPurchaseBalance / BigInt(2);
+      const transferAmount = postPurchaseBalance / 2n;
       await token
         .connect(alice)
         .transfer(await bob.getAddress(), transferAmount);
@@ -219,7 +215,7 @@ describe("Token", function () {
       const totalReceived = bobReceived + aliceReceived + platformReceived;
 
       // make sure it's .5% of the total
-      const expectedTax = (BigInt(totalReceived) * BigInt(500)) / BigInt(100_000);
+      const expectedTax = (BigInt(totalReceived) * 1000n) / 100_000n;
 
       // expect
       expect(platformReceived + ownerVaultReceived).to.equal(expectedTax);

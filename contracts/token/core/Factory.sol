@@ -442,4 +442,14 @@ contract Factory is
     function setRouter(address router_) external onlyRole(ADMIN_ROLE) {
         router = IRouter(router_);
     }
+
+    /**
+     * @notice Sets tax exemption status for an address
+     * @param token_ Token address
+     * @param account_ Account to update
+     * @param isExempt_ Whether account should be tax exempt
+     */
+    function setTokenTaxExempt(address token_, address account_, bool isExempt_) external onlyRole(ADMIN_ROLE) {
+        Token(token_).setTaxExempt(account_, isExempt_);
+    }
 }

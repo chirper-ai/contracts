@@ -70,7 +70,12 @@ export async function createToken(
     fee: number;
     weight: number;
     dexType: DexType;
-  }>
+  }>,
+  airdropParams?: {
+    merkleRoot: string;
+    claimantCount: number;
+    percentage: number;
+  }
 ): Promise<Contract> {
   const { factory, assetToken, uniswapV2Router } = context;
 
@@ -84,17 +89,26 @@ export async function createToken(
     },
   ];
 
+  // Default empty airdrop params if none provided
+  const defaultAirdropParams = {
+    merkleRoot: ethers.ZeroHash,
+    claimantCount: 0,
+    percentage: 0,
+  };
+
   // Launch token through factory
   await assetToken
     .connect(creator)
     .approve(await factory.getAddress(), ethers.parseEther("10"));
+
   const tx = await factory.connect(creator).launch(
     "Test Agent",
     "TEST",
     "https://test.com",
     "Test intention",
-    ethers.parseEther("10"), // 1000 initial purchase
-    dexConfigs || defaultDexConfig
+    ethers.parseEther("10"), // initial purchase
+    dexConfigs || defaultDexConfig,
+    airdropParams || defaultAirdropParams
   );
 
   const receipt = await tx.wait();

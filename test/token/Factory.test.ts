@@ -37,15 +37,19 @@ describe("Factory", function () {
   describe("Token Launch", function () {
     it("should launch new token correctly", async function () {
       const { factory, alice, assetToken, uniswapV2Router } = context;
-
-      const dexConfig = [
-        {
-          router: await uniswapV2Router.getAddress(),
+      
+      const defaultAirdropParams = {
+          merkleRoot: ethers.ZeroHash,
+          claimantCount: 0,
+          percentage: 0
+      };
+  
+      const defaultDexConfig = [{
+          router: await uniswapV2Router.getAddress(), // Will be set in tests
           fee: 3_000,
           weight: 100_000,
-          dexType: 0, // UniswapV2
-        },
-      ];
+          dexType: 0
+      }];
 
       // approve
       await assetToken
@@ -60,7 +64,8 @@ describe("Factory", function () {
           "https://test.com",
           "Test intention",
           ethers.parseEther("10"),
-          dexConfig
+          defaultDexConfig,
+          defaultAirdropParams
         );
 
       const receipt = await tx.wait();
@@ -87,6 +92,12 @@ describe("Factory", function () {
           dexType: 0,
         },
       ];
+      
+      const defaultAirdropParams = {
+          merkleRoot: ethers.ZeroHash,
+          claimantCount: 0,
+          percentage: 0
+      };
 
       // approve
       await assetToken
@@ -101,7 +112,8 @@ describe("Factory", function () {
           "Test intention",
           "https://test.com",
           ethers.parseEther("10"),
-          dexConfig
+          dexConfig,
+          defaultAirdropParams
         );
 
       const receipt = await tx.wait();
@@ -135,6 +147,12 @@ describe("Factory", function () {
           dexType: 0,
         },
       ];
+      
+      const defaultAirdropParams = {
+          merkleRoot: ethers.ZeroHash,
+          claimantCount: 0,
+          percentage: 0
+      };
 
       // approve
       await assetToken
@@ -151,7 +169,8 @@ describe("Factory", function () {
             "Test intention",
             "https://test.com",
             ethers.parseEther("10"),
-            dexConfig
+            dexConfig,
+            defaultAirdropParams
           );
       } catch (e) {
         failed = true;

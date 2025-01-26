@@ -50,16 +50,16 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     string public intention;
 
     /// @notice Buy tax rate in basis points
-    uint256 public buyTax;
+    uint256 public immutable buyTax;
 
     /// @notice Sell tax rate in basis points
-    uint256 public sellTax;
+    uint256 public immutable sellTax;
 
     /// @notice Address where tax is collected
     address public creatorTaxVault;
 
     /// @notice Address where platform fees are collected
-    address public platformTreasury;
+    address public immutable platformTreasury;
 
     /// @notice Manager contract that manages graduation
     address public immutable manager;
@@ -147,8 +147,8 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
         platformTreasury = platformTreasury_;
 
         // Setup default parameters
-        buyTax = 500;        // 0.5% default buy tax
-        sellTax = 500;       // 0.5% default sell tax
+        buyTax = 1000;        // 1% default buy tax
+        sellTax = 1000;       // 1% default sell tax
 
         // Default exemptions
         isTaxExempt[address(this)] = true;
@@ -186,33 +186,6 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     /*//////////////////////////////////////////////////////////////
                             ADMIN FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice Updates tax rates
-     * @param buyTax_ New buy tax rate
-     * @param sellTax_ New sell tax rate
-     */
-    function setTaxes(
-        uint256 buyTax_,
-        uint256 sellTax_
-    ) external onlyOwner {
-        require(buyTax_ <= 5000, "Buy tax too high"); // Max 5%
-        require(sellTax_ <= 5000, "Sell tax too high"); // Max 5%
-        buyTax = buyTax_;
-        sellTax = sellTax_;
-        emit TaxUpdated(buyTax_, sellTax_);
-    }
-
-    /**
-     * @notice Sets or unsets a pool address
-     * @param pool Pool address to update
-     * @param isPool_ Whether address is a pool
-     */
-    function setPool(address pool, bool isPool_) external onlyOwner {
-        require(pool != address(0), "Invalid address");
-        isPool[pool] = isPool_;
-        emit PoolUpdated(pool, isPool_);
-    }
 
     /**
      * @notice Updates tax exemption status for an address
