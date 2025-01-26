@@ -176,12 +176,12 @@ describe("Token", function () {
       const initialBobBalance = await token.balanceOf(await bob.getAddress());
       const initialAliceBalance = await token.balanceOf(await alice.getAddress());
       const initialPlatformBalance = await token.balanceOf(await token.platformTreasury());
-      const initialOwnerVaultBalance = await token.balanceOf(await token.creatorTaxVault());
+      const initialOwnerVaultBalance = await token.balanceOf(await token.creator());
 
       // bob has no tokens
       expect(initialBobBalance).to.equal(0n);
       expect(initialAliceBalance).to.equal(initialOwnerVaultBalance);
-      expect(await token.creatorTaxVault()).to.equal(await alice.getAddress());
+      expect(await token.creator()).to.equal(await alice.getAddress());
 
       // approve
       await assetToken.connect(bob).approve(await router.getAddress(), assetAmountIn);
@@ -200,7 +200,7 @@ describe("Token", function () {
       const finalBobBalance = await token.balanceOf(await bob.getAddress());
       const finalAliceBalance = await token.balanceOf(await alice.getAddress());
       const finalPlatformBalance = await token.balanceOf(await token.platformTreasury());
-      const finalOwnerVaultBalance = await token.balanceOf(await token.creatorTaxVault());
+      const finalOwnerVaultBalance = await token.balanceOf(await token.creator());
 
       // ensure tax was split correctly
       const bobReceived = finalBobBalance - initialBobBalance;

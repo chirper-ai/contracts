@@ -116,9 +116,6 @@ contract Manager is
     /// @notice Asset token used for trading
     address public assetToken;
 
-    /// @notice Slippage tolerance for graduation liquidity deployment
-    uint256 public gradSlippage;
-
     /// @notice Graduation threshold for bonding pair liquidity
     uint256 public gradThreshold;
 
@@ -156,12 +153,6 @@ contract Manager is
         address[] pools
     );
 
-    /**
-     * @notice Emitted when graduation parameters are updated
-     * @param gradSlippage New slippage tolerance
-     */
-    event GraduationParamsUpdated(uint256 gradSlippage);
-
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -179,13 +170,11 @@ contract Manager is
      * @notice Initializes the manager contract
      * @param factory_ Factory contract address
      * @param assetToken_ Asset token address
-     * @param gradSlippage_ Graduation slippage tolerance
      * @param gradThreshold_ Graduation reserve ratio threshold
      */
     function initialize(
         address factory_,
         address assetToken_,
-        uint256 gradSlippage_,
         uint256 gradThreshold_
     ) external initializer {
         __AccessControl_init();
@@ -193,17 +182,12 @@ contract Manager is
 
         require(factory_ != address(0), "Invalid factory");
         require(assetToken_ != address(0), "Invalid asset token");
-        require(
-            gradSlippage_ > 0 && gradSlippage_ <= BASIS_POINTS,
-            "Invalid slippage"
-        );
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(ADMIN_ROLE, msg.sender);
 
         factory = IFactory(factory_);
         assetToken = assetToken_;
-        gradSlippage = gradSlippage_;
         gradThreshold = gradThreshold_;
     }
 
@@ -404,21 +388,6 @@ contract Manager is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Updates graduation slippage tolerance
-     * @param gradSlippage_ New slippage tolerance
-     */
-    function setGradSlippage(
-        uint256 gradSlippage_
-    ) external onlyRole(ADMIN_ROLE) {
-        require(
-            gradSlippage_ > 0 && gradSlippage_ <= BASIS_POINTS,
-            "Invalid slippage"
-        );
-        gradSlippage = gradSlippage_;
-        emit GraduationParamsUpdated(gradSlippage_);
-    }
-
-    /**
      * @notice Updates graduation threshold
      * @param gradThreshold_ New threshold
      */
@@ -455,10 +424,6 @@ contract Manager is
             pool = dexFactory.createPair(token, assetToken);
         }
 
-        // Calculate minimum amounts with slippage protection
-        uint256 minTokenAmount = (tokenAmount * (BASIS_POINTS - gradSlippage)) / BASIS_POINTS;
-        uint256 minAssetAmount = (assetAmount * (BASIS_POINTS - gradSlippage)) / BASIS_POINTS;
-
         // Approve and add liquidity
         IERC20(token).forceApprove(routerAddress, tokenAmount);
         IERC20(assetToken).forceApprove(routerAddress, assetAmount);
@@ -468,8 +433,8 @@ contract Manager is
             assetToken,
             tokenAmount,
             assetAmount,
-            minTokenAmount,
-            minAssetAmount,
+            0,
+            0,
             address(0),
             block.timestamp
         );
@@ -571,10 +536,6 @@ contract Manager is
             pool = veloFactory.createPair(token, assetToken, stable);
         }
 
-        // Calculate minimum amounts
-        uint256 minTokenAmount = (tokenAmount * (BASIS_POINTS - gradSlippage)) / BASIS_POINTS;
-        uint256 minAssetAmount = (assetAmount * (BASIS_POINTS - gradSlippage)) / BASIS_POINTS;
-
         // Add liquidity
         router.addLiquidity(
             token,
@@ -582,8 +543,8 @@ contract Manager is
             stable,
             tokenAmount,
             assetAmount,
-            minTokenAmount,
-            minAssetAmount,
+            0,
+            0,
             address(this),
             block.timestamp
         );

@@ -16,7 +16,6 @@ describe("Manager", function () {
 
       expect(await manager.factory()).to.equal(await factory.getAddress());
       expect(await manager.assetToken()).to.equal(await assetToken.getAddress());
-      expect(await manager.gradSlippage()).to.equal(1_000n); // 1%
       expect(await manager.gradThreshold()).to.equal(20_000n); // 20%
     });
 
@@ -205,30 +204,6 @@ describe("Manager", function () {
       // TODO: Add trading to reach graduation threshold
       // TODO: Trigger graduation
       // TODO: Verify proportional liquidity deployment
-    });
-  });
-
-  describe("Admin Functions", function () {
-    it("should update graduation parameters correctly", async function () {
-      const { manager } = context;
-      
-      await manager.setGradSlippage(500); // 0.5%
-      expect(await manager.gradSlippage()).to.equal(500n);
-
-      await manager.setGradThreshold(15_000); // 15%
-      expect(await manager.gradThreshold()).to.equal(15_000n);
-    });
-
-    it("should revert invalid parameter updates", async function () {
-      const { manager } = context;
-
-      await expect(
-        manager.setGradSlippage(0)
-      ).to.be.revertedWith("Invalid slippage");
-
-      await expect(
-        manager.setGradSlippage(100_001)
-      ).to.be.revertedWith("Invalid slippage");
     });
   });
 });

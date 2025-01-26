@@ -61,6 +61,12 @@ contract Factory is
     /// @notice Platform fee percentage (1%)
     uint256 public constant PLATFORM_FEE = 1_000;
 
+    /// @notice Maximum initial purchase size (5% of supply)
+    uint256 public constant MAX_INITIAL_PURCHASE = 5_000;
+
+    /// @notice Maximum airdrop percentage (5%)
+    uint256 public constant MAX_AIRDROP_PERCENTAGE = 5_000;
+
     /*//////////////////////////////////////////////////////////////
                                  STRUCTS
     //////////////////////////////////////////////////////////////*/
@@ -407,6 +413,12 @@ contract Factory is
         address[] memory path = new address[](2);
         path[0] = assetToken;
         path[1] = token;
+
+        // ensure initial purchase is max 5% of supply
+        uint256[] memory amounts = router.getAmountsOut(initialPurchase, path);
+
+        // check agent amount out is less than 5% of supply
+        require(amounts[1] <= (initialSupply * MAX_INITIAL_PURCHASE) / BASIS_POINTS, "Initial purchase too large");
         
         // do actual first purchase
         router.swapExactTokensForTokens(
@@ -515,7 +527,7 @@ contract Factory is
         IERC20 tokenContract,
         AirdropParams calldata params
     ) internal returns (address airdrop, uint256 airdropAmount) {
-        require(params.percentage > 0 && params.percentage <= 5_000, "Invalid percentage");
+        require(params.percentage > 0 && params.percentage <= MAX_AIRDROP_PERCENTAGE, "Invalid percentage");
         require(params.merkleRoot != bytes32(0), "Invalid merkle root");
         
         airdropAmount = (initialSupply * params.percentage) / BASIS_POINTS;
@@ -579,6 +591,10 @@ contract Factory is
     function setRouter(address router_) external onlyRole(ADMIN_ROLE) {
         router = IRouter(router_);
     }
+
+    /*//////////////////////////////////////////////////////////////
+                            ADMIN TOKEN FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
 
     /**
      * @notice Sets tax exemption status for an address

@@ -56,7 +56,7 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     uint256 public immutable sellTax;
 
     /// @notice Address where tax is collected
-    address public creatorTaxVault;
+    address public creator;
 
     /// @notice Address where platform fees are collected
     address public immutable platformTreasury;
@@ -123,7 +123,7 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
      * @param url_ Token URL for metadata
      * @param intention_ Token intention for metadata
      * @param manager_ Manager contract address
-     * @param creatorTaxVault_ Tax collection address
+     * @param creator_ Tax collection address
      * @param platformTreasury_ Platform fee collection address
      * @dev Initial tax rates and transaction limits can be set by admin later
      */
@@ -134,7 +134,7 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
         string memory url_,
         string memory intention_,
         address manager_,
-        address creatorTaxVault_,
+        address creator_,
         address platformTreasury_
     ) ERC20(name_, symbol_) ERC20Permit(name_) Ownable(msg.sender) {
         require(manager_ != address(0), "Invalid manager");
@@ -143,7 +143,7 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
         url = url_;
         intention = intention_;
         manager = manager_;
-        creatorTaxVault = creatorTaxVault_;
+        creator = creator_;
         platformTreasury = platformTreasury_;
 
         // Setup default parameters
@@ -259,9 +259,9 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
         uint256 taxAmount = _calculateTax(from, to, amount);
         
         if (taxAmount > 0) {
-            // send half tax each to creatorTaxVault and platformTreasury
+            // send half tax each to creator and platformTreasury
             uint256 halfTax = taxAmount / 2;
-            super._update(from, creatorTaxVault, halfTax);
+            super._update(from, creator, halfTax);
             super._update(from, platformTreasury, taxAmount - halfTax);
             amount -= taxAmount;
         }

@@ -217,7 +217,6 @@ export async function deployFixture(): Promise<TestContext> {
   const manager = await upgrades.deployProxy(Manager, [
     await factory.getAddress(),
     await assetToken.getAddress(),
-    1_000, // graduation slippage
     20_000 // graduation threshold
   ]);
 
