@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 /**
- * @title IBondingPair
+ * @title IPair
  * @dev Interface for the bonding curve automated market maker for agent tokens.
  * 
  * The bonding curve uses the formula: price = K / supply
@@ -10,7 +10,7 @@ pragma solidity ^0.8.20;
  * - K is a constant that determines curve steepness
  * - supply is the current token supply in the pair
  */
-interface IBondingPair {
+interface IPair {
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/

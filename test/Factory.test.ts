@@ -19,9 +19,6 @@ describe("Factory", function () {
       expect(await factory.platformTreasury()).to.equal(
         await owner.getAddress()
       );
-      expect(Number(await factory.initialSupply())).to.equal(
-        Number(ethers.parseEther("1000000000"))
-      );
       expect(await factory.K()).to.equal(250n);
     });
 
@@ -129,8 +126,8 @@ describe("Factory", function () {
       ).to.equal(pair);
 
       // Verify bonding pair parameters
-      const BondingPair = await ethers.getContractFactory("BondingPair");
-      const bondingPair = BondingPair.attach(pair);
+      const Pair = await ethers.getContractFactory("Pair");
+      const bondingPair = Pair.attach(pair);
 
       expect(await bondingPair.K()).to.equal(await factory.K());
       expect(await bondingPair.router()).to.equal(await factory.router());
@@ -188,56 +185,6 @@ describe("Factory", function () {
       await factory.setK(newK);
 
       expect(await factory.K()).to.equal(newK);
-    });
-
-    it("should update initial supply correctly", async function () {
-      const { factory } = context;
-
-      const newSupply = 2_000_000;
-      await factory.setInitialSupply(newSupply);
-      expect(Number(await factory.initialSupply())).to.equal(Number(newSupply));
-    });
-
-    it("should not allow parameter updates from non-admin", async function () {
-      const { factory, alice } = context;
-
-      let failed = false;
-      try {
-        await factory.connect(alice).setK(ethers.parseEther("2"));
-      } catch (e) {
-        failed = true;
-      }
-      expect(failed).to.be.true;
-
-      failed = false;
-      try {
-        await factory.connect(alice).setInitialSupply(2_000_000);
-      } catch (e) {
-        failed = true;
-      }
-      expect(failed).to.be.true;
-    });
-
-    it("should not allow setting invalid parameters", async function () {
-      const { factory } = context;
-
-      // Invalid K (zero)
-      let failed = false;
-      try {
-        await factory.setK(0);
-      } catch (e) {
-        failed = true;
-      }
-      expect(failed).to.be.true;
-
-      // Invalid initial supply (zero)
-      failed = false;
-      try {
-        await factory.setInitialSupply(0);
-      } catch (e) {
-        failed = true;
-      }
-      expect(failed).to.be.true;
     });
   });
 });

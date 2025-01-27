@@ -6,11 +6,11 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-import "../interfaces/IToken.sol";
-import "../interfaces/IRouter.sol";
+import "../../interfaces/IToken.sol";
+import "../../interfaces/IRouter.sol";
 
 /**
- * @title BondingPair
+ * @title Pair
  * @dev Implements a quadratic bonding curve automated market maker for agent tokens.
  * 
  * The bonding curve uses the formula: price = K / (supply²)
@@ -33,7 +33,7 @@ import "../interfaces/IRouter.sol";
  * Buy formula: newReserveAgent = sqrt(K / newReserveAsset)
  * Sell formula: newReserveAsset = K / (newReserveAgent²)
  */
-contract BondingPair is ReentrancyGuard {
+contract Pair is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /*//////////////////////////////////////////////////////////////

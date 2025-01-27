@@ -1,10 +1,10 @@
-// test/BondingPair.test.ts
+// test/Pair.test.ts
 import { ethers } from "hardhat";
 import { expect, loadFixture, deployFixture, createToken } from "./setup";
 import type { TestContext } from "./setup";
 import { Contract } from "ethers";
 
-describe("BondingPair", function () {
+describe("Pair", function () {
   let context: TestContext;
   let token: Contract;
   let pair: Contract;
@@ -17,8 +17,8 @@ describe("BondingPair", function () {
       await token.getAddress(),
       await context.assetToken.getAddress()
     );
-    const BondingPair = await ethers.getContractFactory("BondingPair");
-    pair = BondingPair.attach(pairAddress);
+    const Pair = await ethers.getContractFactory("Pair");
+    pair = Pair.attach(pairAddress);
   });
 
   describe("Initialization", function () {

@@ -7,11 +7,12 @@ import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol"
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import "./BondingPair.sol";
-import "./Token.sol";
-import "./AirDrop.sol";
-import "../interfaces/IRouter.sol";
-import "../interfaces/IManager.sol";
+import "../base/Pair.sol";
+import "../distribution/Airdrop.sol";
+import "../../interfaces/IToken.sol";
+import "../../interfaces/IRouter.sol";
+import "../../interfaces/IManager.sol";
+import "../../interfaces/ITokenFactory.sol";
 
 /**
  * @title Factory
@@ -102,11 +103,11 @@ contract Factory is
     /// @notice Manager contract for managing AI agent tokens
     IManager public manager;
 
+    /// @notice token factory contract
+    ITokenFactory public tokenFactory;
+
     /// @notice platform treasury address
     address public platformTreasury;
-
-    /// @notice Initial token supply for new tokens (in whole tokens)
-    uint256 public initialSupply;
 
     /**
      * @notice Bonding curve constant (K) that determines curve shape
@@ -157,7 +158,6 @@ contract Factory is
 
     /**
      * @notice Initializes the factory with required parameters
-     * @param initialSupply_ Initial token supply for new tokens
      * @param k_ Bonding curve constant (typical range: 1e17 to 1e19)
      * @dev 
      * The K and assetRate parameters work together to define the economic model:
@@ -169,19 +169,16 @@ contract Factory is
      * - K = 1e17, assetRate = 5000 (5%): gentle curve, low liquidity
      */
     function initialize(
-        uint256 initialSupply_,
         uint256 k_
     ) external initializer {
         __AccessControl_init();
         __ReentrancyGuard_init();
         
-        require(initialSupply_ > 0, "Invalid initial supply");
         require(k_ > 0, "Invalid K");
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(ADMIN_ROLE, msg.sender);
 
-        initialSupply = initialSupply_;
         K = k_;
 
         // platform treasury should be creator initially
@@ -341,14 +338,14 @@ contract Factory is
         AirdropParams calldata airdropParams
     ) internal returns (uint256) {
         IERC20 agentToken = IERC20(token);
-        uint256 liquiditySupply = initialSupply;
+        uint256 liquiditySupply = agentToken.totalSupply();
         
         if (airdropParams.claimantCount > 0) {
             (,uint256 airdropAmount) = _createAirdrop(token, agentToken, airdropParams);
             liquiditySupply -= airdropAmount;
         }
         
-        uint256 platformFee = (initialSupply * PLATFORM_FEE) / BASIS_POINTS;
+        uint256 platformFee = (liquiditySupply * PLATFORM_FEE) / BASIS_POINTS;
         agentToken.transfer(platformTreasury, platformFee);
         liquiditySupply -= platformFee;
 
@@ -418,7 +415,7 @@ contract Factory is
         uint256[] memory amounts = router.getAmountsOut(initialPurchase, path);
 
         // check agent amount out is less than 5% of supply
-        require(amounts[1] <= (initialSupply * MAX_INITIAL_PURCHASE) / BASIS_POINTS, "Initial purchase too large");
+        require(amounts[1] <= (agentToken.totalSupply() * MAX_INITIAL_PURCHASE) / BASIS_POINTS, "Initial purchase too large");
         
         // do actual first purchase
         router.swapExactTokensForTokens(
@@ -452,26 +449,17 @@ contract Factory is
         string calldata url,
         string calldata intention
     ) internal returns (address token) {
-        // Create token with initial configuration
-        Token newToken = new Token(
+        // launch with factory
+        address newToken = tokenFactory.launch(
             name,
             symbol,
-            initialSupply,
             url,
             intention,
-            address(manager),
-
-            // tax vaults
-            msg.sender,
-            platformTreasury
+            msg.sender
         );
-        token = address(newToken);
-
-        // add tax / tx limit exemptions
-        newToken.setTaxExempt(address(manager), true);
         
         // Store vault mapping for token
-        return token;
+        return newToken;
     }
 
     /**
@@ -500,7 +488,7 @@ contract Factory is
         require(agentToken != assetToken, "Identical addresses");
 
         // Create bonding pair with K constant
-        BondingPair newPair = new BondingPair(
+        Pair newPair = new Pair(
             address(router),
             agentToken,
             assetToken,
@@ -530,9 +518,9 @@ contract Factory is
         require(params.percentage > 0 && params.percentage <= MAX_AIRDROP_PERCENTAGE, "Invalid percentage");
         require(params.merkleRoot != bytes32(0), "Invalid merkle root");
         
-        airdropAmount = (initialSupply * params.percentage) / BASIS_POINTS;
+        airdropAmount = (tokenContract.totalSupply() * params.percentage) / BASIS_POINTS;
         
-        MerkleAirdrop newAirdrop = new MerkleAirdrop(
+        Airdrop newAirdrop = new Airdrop(
             token,
             params.merkleRoot,
             params.claimantCount
@@ -562,15 +550,6 @@ contract Factory is
     }
 
     /**
-     * @notice Updates the initial supply for new tokens
-     * @param newSupply New initial supply amount
-     */
-    function setInitialSupply(uint256 newSupply) external onlyRole(ADMIN_ROLE) {
-        require(newSupply > 0, "Invalid supply");
-        initialSupply = newSupply;
-    }
-
-    /**
      * @notice Updates the platform treasury address
      * @param newPlatformTreasury New treasury address
      */
@@ -592,17 +571,10 @@ contract Factory is
         router = IRouter(router_);
     }
 
-    /*//////////////////////////////////////////////////////////////
-                            ADMIN TOKEN FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-
     /**
-     * @notice Sets tax exemption status for an address
-     * @param token_ Token address
-     * @param account_ Account to update
-     * @param isExempt_ Whether account should be tax exempt
+     * @notice sets the token factory address
      */
-    function setTokenTaxExempt(address token_, address account_, bool isExempt_) external onlyRole(ADMIN_ROLE) {
-        Token(token_).setTaxExempt(account_, isExempt_);
+    function setTokenFactory(address tokenFactory_) external onlyRole(ADMIN_ROLE) {
+        tokenFactory = ITokenFactory(tokenFactory_);
     }
 }

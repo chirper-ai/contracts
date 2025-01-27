@@ -8,8 +8,8 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 // interfaces
-import "../interfaces/IRouter.sol";
-import "../interfaces/IManager.sol";
+import "../../interfaces/IRouter.sol";
+import "../../interfaces/IManager.sol";
 
 /**
  * @title Token

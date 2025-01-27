@@ -47,6 +47,7 @@ export interface TestContext {
   // Token Contracts
   assetToken: Contract;
   weth: Contract;
+  tokenFactory: Contract;
 
   // DEX Contracts
   uniswapV2Router: Contract;
@@ -200,7 +201,6 @@ export async function deployFixture(): Promise<TestContext> {
   // Factory First
   const Factory = await ethers.getContractFactory("Factory");
   const factory = await upgrades.deployProxy(Factory, [
-    ethers.parseEther("1000000000"), // 1B initial supply
     250, // K constant
   ]);
 
@@ -220,9 +220,19 @@ export async function deployFixture(): Promise<TestContext> {
     20_000 // graduation threshold
   ]);
 
+  // Token Factory
+  const TokenFactory = await ethers.getContractFactory("TokenFactory");
+  const tokenFactory = await upgrades.deployProxy(TokenFactory, [
+    await factory.getAddress(),
+    await manager.getAddress(),
+    ethers.parseEther("1000000000"), // 1B initial supply
+  ]);
+
+
   // Set manager and router in factory
   await factory.connect(owner).setRouter(await router.getAddress());
   await factory.connect(owner).setManager(await manager.getAddress());
+  await factory.connect(owner).setTokenFactory(await tokenFactory.getAddress());
 
   return {
     owner,
@@ -233,6 +243,7 @@ export async function deployFixture(): Promise<TestContext> {
     manager,
     assetToken,
     weth,
+    tokenFactory,
     uniswapV2Router,
     uniswapV2Factory,
     uniswapV3Router,

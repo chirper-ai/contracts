@@ -16,8 +16,8 @@ describe("Router", function () {
       await token.getAddress(),
       await context.assetToken.getAddress()
     );
-    const BondingPair = await ethers.getContractFactory("BondingPair");
-    pair = BondingPair.attach(pairAddress);
+    const Pair = await ethers.getContractFactory("Pair");
+    pair = Pair.attach(pairAddress);
   });
 
   describe("Initialization", function () {

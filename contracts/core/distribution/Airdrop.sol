@@ -9,7 +9,7 @@ import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /**
- * @title MerkleAirdrop
+ * @title Airdrop
  * @dev A gas-efficient contract for large-scale token airdrops using merkle proofs
  * where each eligible address receives an equal share of the total token balance
  *
@@ -26,7 +26,7 @@ import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
  * - Owner-only admin functions
  * - No user data stored on-chain (only bitmap)
  */
-contract MerkleAirdrop is Ownable, ReentrancyGuard {
+contract Airdrop is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /*//////////////////////////////////////////////////////////////

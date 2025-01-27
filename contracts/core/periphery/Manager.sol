@@ -14,22 +14,22 @@ import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
 import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 
 // Uniswap V3
-import "../interfaces/UniswapV3/IUniswapV3Pool.sol";
-import "../interfaces/UniswapV3/IUniswapV3Factory.sol";
-import "../interfaces/UniswapV3/INonfungiblePositionManager.sol";
+import "../../interfaces/UniswapV3/IUniswapV3Pool.sol";
+import "../../interfaces/UniswapV3/IUniswapV3Factory.sol";
+import "../../interfaces/UniswapV3/INonfungiblePositionManager.sol";
 
 // Velodrome
-import "../interfaces/Velodrome/IVelodromeRouter.sol";
-import "../interfaces/Velodrome/IVelodromeFactory.sol";
+import "../../interfaces/Velodrome/IVelodromeRouter.sol";
+import "../../interfaces/Velodrome/IVelodromeFactory.sol";
 
 // Local interfaces
-import "../interfaces/IRouter.sol";
-import "../interfaces/IFactory.sol";
-import "../interfaces/IBondingPair.sol";
-import "../interfaces/IToken.sol";
+import "../../interfaces/IRouter.sol";
+import "../../interfaces/IFactory.sol";
+import "../../interfaces/IPair.sol";
+import "../../interfaces/IToken.sol";
 
 // tick math
-import "../libraries/TickMath.sol";
+import "../../libraries/TickMath.sol";
 
 /**
  * @title Manager
@@ -261,7 +261,7 @@ contract Manager is
         }
 
         // Get bonding pair info
-        IBondingPair pair = IBondingPair(info.bondingPair);
+        IPair pair = IPair(info.bondingPair);
         (uint256 reserveAgent,,) = pair.getReserves();
         
         // Calculate reserve ratio
@@ -286,7 +286,7 @@ contract Manager is
         require(info.dexPools.length == 0, "Already graduated");
 
         // Get bonding pair liquidity
-        IBondingPair pair = IBondingPair(info.bondingPair);
+        IPair pair = IPair(info.bondingPair);
         (uint256 tokenBalance, uint256 assetBalance,) = pair.getReserves();
 
         require(

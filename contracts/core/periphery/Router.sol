@@ -8,10 +8,10 @@ import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import "../interfaces/IToken.sol";
-import "../interfaces/IFactory.sol";
-import "../interfaces/IManager.sol";
-import "../interfaces/IBondingPair.sol";
+import "../../interfaces/IPair.sol";
+import "../../interfaces/IToken.sol";
+import "../../interfaces/IFactory.sol";
+import "../../interfaces/IManager.sol";
 
 /**
  * @title Router
@@ -284,7 +284,7 @@ contract Router is
         address pair = factory.getPair(agentToken_, assetToken_);
         require(pair != address(0), "pair doesn't exist");
         
-        IBondingPair bondingPair = IBondingPair(pair);
+        IPair bondingPair = IPair(pair);
         (uint256 agentReserve,,) = bondingPair.getReserves();
         require(agentReserve == 0, "already initialized");
 
@@ -321,10 +321,13 @@ contract Router is
         require(msg.sender == factory.manager(), "Only manager");
         address pair = factory.getPair(token, assetToken);
         require(pair != address(0), "Pair not found");
+
+        // bonding pair
+        IPair bondingPair = IPair(pair);
         
         // Transfer tokens to manager
-        IBondingPair(pair).transferTo(msg.sender, tokenAmount);
-        IBondingPair(pair).transferAsset(msg.sender, assetAmount);
+        bondingPair.transferTo(msg.sender, tokenAmount);
+        bondingPair.transferAsset(msg.sender, assetAmount);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -395,16 +398,19 @@ contract Router is
         address pair = factory.getPair(agentToken, assetToken);
         require(pair != address(0), "Pair not found");
 
+        // bonding pair
+        IPair bondingPair = IPair(pair);
+
         // quote
-        uint256 quote = IBondingPair(pair).getAssetAmountOut(amountIn);
+        uint256 quote = bondingPair.getAssetAmountOut(amountIn);
         require(quote >= amountOutMin, "Insufficient output");
         
         // Transfer tokens to pair
         IERC20(agentToken).safeTransferFrom(msg.sender, pair, amountIn);
         
         // Execute swap
-        IBondingPair(pair).swap(amountIn, 0, 0, quote);
-        IBondingPair(pair).transferAsset(to, quote);
+        bondingPair.swap(amountIn, 0, 0, quote);
+        bondingPair.transferAsset(to, quote);
 
         // check graduation
         _checkGraduation(agentToken);
@@ -437,8 +443,11 @@ contract Router is
         address pair = factory.getPair(agentToken, assetToken);
         require(pair != address(0), "Pair not found");
 
+        // bonding pair
+        IPair bondingPair = IPair(pair);
+
         // quote
-        uint256 quote = IBondingPair(pair).getAgentAmountOut(amountIn);
+        uint256 quote = bondingPair.getAgentAmountOut(amountIn);
         require(quote >= amountOutMin, "Insufficient output");
 
         // check holding
@@ -448,8 +457,8 @@ contract Router is
         IERC20(assetToken).safeTransferFrom(msg.sender, pair, amountIn);
         
         // Execute swap
-        IBondingPair(pair).swap(0, amountIn, quote, 0);
-        IBondingPair(pair).transferTo(to, quote);
+        bondingPair.swap(0, amountIn, quote, 0);
+        bondingPair.transferTo(to, quote);
 
         // check graduation
         _checkGraduation(agentToken);
@@ -482,14 +491,17 @@ contract Router is
         address pair = factory.getPair(agentToken, assetToken);
         require(pair != address(0), "Pair not found");
 
+        // bonding pair
+        IPair bondingPair = IPair(pair);
+
         // Calculate required input
         amountIn = _getAgentIn(agentToken, amountOut);
         require(amountIn <= amountInMax, "Excessive input required");
 
         // Transfer tokens to pair
         IERC20(agentToken).safeTransferFrom(msg.sender, pair, amountIn);
-        IBondingPair(pair).swap(amountIn, 0, 0, amountOut);
-        IBondingPair(pair).transferAsset(to, amountOut);
+        bondingPair.swap(amountIn, 0, 0, amountOut);
+        bondingPair.transferAsset(to, amountOut);
 
         // check graduation
         _checkGraduation(agentToken);
@@ -522,6 +534,9 @@ contract Router is
         address pair = factory.getPair(agentToken, assetToken);
         require(pair != address(0), "Pair not found");
 
+        // bonding pair
+        IPair bondingPair = IPair(pair);
+
         // Calculate required input
         amountIn = _getAssetIn(agentToken, amountOut);
         require(amountIn <= amountInMax, "Excessive input required");
@@ -533,8 +548,8 @@ contract Router is
         IERC20(assetToken).safeTransferFrom(msg.sender, pair, amountIn);
 
         // Execute swap
-        IBondingPair(pair).swap(0, amountIn, amountOut, 0);
-        IBondingPair(pair).transferTo(to, amountOut);
+        bondingPair.swap(0, amountIn, amountOut, 0);
+        bondingPair.transferTo(to, amountOut);
 
         // check graduation
         _checkGraduation(agentToken);
@@ -557,7 +572,7 @@ contract Router is
         uint256 amountOut
     ) internal view returns (uint256) {
         address pair = factory.getPair(agentToken, assetToken);
-        return IBondingPair(pair).getAssetAmountOut(amountOut);
+        return IPair(pair).getAssetAmountOut(amountOut);
     }
 
     /**
@@ -568,7 +583,7 @@ contract Router is
         uint256 amountOut
     ) internal view returns (uint256) {
         address pair = factory.getPair(agentToken, assetToken);
-        return IBondingPair(pair).getAgentAmountOut(amountOut);
+        return IPair(pair).getAgentAmountOut(amountOut);
     }
 
     /**
@@ -579,7 +594,7 @@ contract Router is
         uint256 amountIn
     ) internal view returns (uint256) {
         address pair = factory.getPair(agentToken, assetToken);
-        return IBondingPair(pair).getAgentAmountOut(amountIn);
+        return IPair(pair).getAgentAmountOut(amountIn);
     }
 
     /**
@@ -590,7 +605,7 @@ contract Router is
         uint256 amountIn
     ) internal view returns (uint256) {
         address pair = factory.getPair(agentToken, assetToken);
-        return IBondingPair(pair).getAssetAmountOut(amountIn);
+        return IPair(pair).getAssetAmountOut(amountIn);
     }
 
     /**
@@ -617,8 +632,11 @@ contract Router is
      * @param agentToken Token to update
      */
     function _updateMetrics(address pair, address agentToken) internal {
+        // bonding pair
+        IPair bondingPair = IPair(pair);
+
         // Get pair reserves
-        (uint256 agentReserve, uint256 assetReserve, ) = IBondingPair(pair).getReserves();
+        (uint256 agentReserve, uint256 assetReserve, ) = bondingPair.getReserves();
 
         // Get total supply
         uint256 totalSupply = IERC20(agentToken).totalSupply();
@@ -627,7 +645,7 @@ contract Router is
         uint256 circulatingSupply = totalSupply - IERC20(agentToken).balanceOf(pair);
 
         // Calculate price (assetReserve / agentReserve)
-        uint256 price = agentReserve > 0 ? IBondingPair(pair).getAssetAmountOut(1e18) : 0;
+        uint256 price = agentReserve > 0 ? bondingPair.getAssetAmountOut(1e18) : 0;
 
         // Calculate market cap (circulatingSupply * price)
         uint256 marketCap = (circulatingSupply * price) / 1e18;
