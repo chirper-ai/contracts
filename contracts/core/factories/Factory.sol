@@ -16,33 +16,28 @@ import "../../interfaces/ITokenFactory.sol";
 
 /**
  * @title Factory
- * @dev Primary entry point for creating and managing AI agent tokens and their bonding pairs.
+ * @dev Coordinates token launches using external contracts for token creation and trading
  * 
- * The Factory implements a bonding curve mechanism using two key parameters:
+ * Core Components:
+ * 1. External Contracts
+ *    - TokenFactory: Creates new agent tokens
+ *    - Router: Handles trading operations
+ *    - Manager: Manages token lifecycle and graduation
+ *    - Pair: Implements bonding curve mechanics
  * 
- * 1. K (Bonding Curve Constant):
- *    - Determines the shape and behavior of the bonding curve
- *    - Higher K = steeper price increases as supply decreases
- *    - Lower K = more gradual price changes
- *    - Formula: price = K / supply
- *    - Example: If K = 1e18 and supply = 1e6, price = 1e12
+ * 2. Bonding Curve Configuration
+ *    - K parameter determines price sensitivity
+ *    - Higher K = steeper price changes (e.g., K = 1e19)
+ *    - Lower K = gradual price changes (e.g., K = 1e17)
+ *    - Price formula: P = K / supply
  * 
- * 2. Asset Rate:
- *    - Controls the relationship between asset tokens and bonding curve
- *    - Used to scale the initial liquidity requirements
- *    - Higher rate = more asset tokens needed per bonding curve token
- *    - Lower rate = fewer asset tokens needed
- *    - Measured in basis points (1/100th of 1%)
- * 
- * Together, these parameters define the economic model:
- * - Initial Price = (K * assetRate) / (initialSupply * BASIS_POINTS)
- * - Reserve Ratio = (currentSupply * currentPrice) / marketCap
- * - Price Slippage = change in K / change in supply^2
- * 
- * This creates a deterministic pricing mechanism where:
- * 1. Price increases when tokens are bought
- * 2. Price decreases when tokens are sold
- * 3. Larger trades have proportionally higher slippage
+ * 3. Launch Process
+ *    - Token creation via factory
+ *    - Pair creation with configured K
+ *    - Optional airdrop (max 5%)
+ *    - Platform fee collection (1%)
+ *    - Initial liquidity setup
+ *    - First trade execution
  */
 contract Factory is 
     Initializable, 
@@ -53,19 +48,19 @@ contract Factory is
                                  CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Role identifier for administrative operations
+    /// @notice Admin role for configuration updates
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
 
-    /// @notice Basis points constant for percentage calculations
+    /// @notice Basis points denominator (100%)
     uint256 public constant BASIS_POINTS = 100_000;
 
     /// @notice Platform fee percentage (1%)
     uint256 public constant PLATFORM_FEE = 1_000;
 
-    /// @notice Maximum initial purchase size (5% of supply)
+    /// @notice Maximum initial trade size (5% of supply)
     uint256 public constant MAX_INITIAL_PURCHASE = 5_000;
 
-    /// @notice Maximum airdrop percentage (5%)
+    /// @notice Maximum airdrop allocation (5% of supply)
     uint256 public constant MAX_AIRDROP_PERCENTAGE = 5_000;
 
     /*//////////////////////////////////////////////////////////////
@@ -73,10 +68,10 @@ contract Factory is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Optional airdrop parameters
-     * @param merkleRoot Root of merkle tree for airdrop claims
-     * @param claimantCount Number of addresses eligible for airdrop
-     * @param percentage Percentage of initial supply to airdrop (in basis points)
+     * @notice Optional token airdrop configuration
+     * @param merkleRoot Hash root for verifying claims
+     * @param claimantCount Number of eligible addresses
+     * @param percentage Supply percentage for airdrop
      */
     struct AirdropParams {
         bytes32 merkleRoot;
@@ -88,36 +83,28 @@ contract Factory is
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
     
-    /// @notice Bidirectional mapping of token addresses to their trading pairs
+    /// @notice Maps tokens to their trading pairs
     mapping(address => mapping(address => address)) public getPair;
 
-    /// @notice Mapping of token addresses to their airdrop contracts
+    /// @notice Maps tokens to their airdrop contracts
     mapping(address => address) public tokenToAirdrop;
 
-    /// @notice Sequential list of all created pair addresses for enumeration
+    /// @notice List of all created pair addresses
     address[] public allPairs;
 
-    /// @notice Router contract that handles trading operations
+    /// @notice Contract handling trades
     IRouter public router;
 
-    /// @notice Manager contract for managing AI agent tokens
+    /// @notice Contract managing token lifecycle
     IManager public manager;
 
-    /// @notice token factory contract
+    /// @notice Contract creating new tokens
     ITokenFactory public tokenFactory;
 
-    /// @notice platform treasury address
+    /// @notice Address receiving platform fees
     address public platformTreasury;
 
-    /**
-     * @notice Bonding curve constant (K) that determines curve shape
-     * @dev K is used in the formula: price = K / supply
-     * Measured in the asset token's decimals (typically 1e18)
-     * A higher K means steeper price changes:
-     * - K = 1e18: moderate price curve
-     * - K = 1e19: steeper price curve
-     * - K = 1e17: gentler price curve
-     */
+    /// @notice Bonding curve steepness parameter
     uint256 public K;
 
     /*//////////////////////////////////////////////////////////////
@@ -125,13 +112,13 @@ contract Factory is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Emitted when a new token and trading pair is launched
-     * @param token The address of the newly created token contract
-     * @param pair The address of the newly created bonding pair contract
-     * @param creator Address that initiated the launch
+     * @notice Records new token launch
+     * @param token New token address
+     * @param pair Trading pair address
+     * @param creator Launch initiator
      * @param name Token name
      * @param symbol Token symbol
-     * @param airdrop Address of the airdrop contract (if created)
+     * @param airdrop Airdrop contract (if used)
      */
     event Launch(
         address indexed token,
@@ -141,7 +128,6 @@ contract Factory is
         string symbol,
         address airdrop
     );
-
 
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
@@ -157,20 +143,10 @@ contract Factory is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Initializes the factory with required parameters
-     * @param k_ Bonding curve constant (typical range: 1e17 to 1e19)
-     * @dev 
-     * The K and assetRate parameters work together to define the economic model:
-     * - K determines price sensitivity
-     * - assetRate determines initial liquidity requirements
-     * Example values:
-     * - K = 1e18, assetRate = 10000 (10%): moderate curve, moderate liquidity
-     * - K = 1e19, assetRate = 20000 (20%): steep curve, high liquidity
-     * - K = 1e17, assetRate = 5000 (5%): gentle curve, low liquidity
+     * @notice Sets initial contract configuration
+     * @param k_ Bonding curve constant (e.g., 1e18)
      */
-    function initialize(
-        uint256 k_
-    ) external initializer {
+    function initialize(uint256 k_) external initializer {
         __AccessControl_init();
         __ReentrancyGuard_init();
         
@@ -180,8 +156,6 @@ contract Factory is
         _grantRole(ADMIN_ROLE, msg.sender);
 
         K = k_;
-
-        // platform treasury should be creator initially
         platformTreasury = msg.sender;
     }
 
@@ -190,48 +164,16 @@ contract Factory is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Primary entry point for launching new AI agent tokens
-     * @dev Orchestrates the entire token launch process using a bonding curve mechanism
-     * 
-     * Launch Process:
-     * 1. Contract Creation:
-     *    - Deploys token contract with initial supply
-     *    - Creates bonding pair with price curve K
-     *    - Links to asset token (e.g. ETH)
-     * 
-     * 2. Distribution:
-     *    - Optional airdrop allocation
-     *    - Platform fee transfer (0.1%)
-     *    - Initial liquidity provision
-     * 
-     * 3. Market Setup:
-     *    - Initial price determination
-     *    - First trade execution
-     *    - Trading permissions
-     * 
-     * Economic Model:
-     * - Initial Price = (K * assetRate) / (initialSupply * BASIS_POINTS)
-     * - Price curve follows p = K/s where s is supply
-     * - Slippage increases with trade size
-     * 
-     * Security:
-     * - NonReentrant guard
-     * - Access control
-     * - Safe token transfers
-     * 
-     * Events:
-     * - Emits Launch event with token details
-     * - Indexed for efficient querying
-     * 
-     * @param name Token name for ERC20 metadata
-     * @param symbol Token symbol for ERC20 metadata
-     * @param url Reference URL for token documentation
-     * @param intention Description of token's purpose
-     * @param initialPurchase Amount of asset tokens for first trade
-     * @param dexConfigs Array of DEX configurations
+     * @notice Launches new agent token with bonding curve
+     * @param name Token name
+     * @param symbol Token symbol
+     * @param url Reference URL
+     * @param intention Token purpose
+     * @param initialPurchase First trade size in asset tokens
+     * @param dexConfigs DEX listing parameters
      * @param airdropParams Optional airdrop configuration
-     * @return token Address of created token contract
-     * @return pair Address of created bonding pair
+     * @return token New token address
+     * @return pair New pair address
      */
     function launch(
         string calldata name,
@@ -242,106 +184,93 @@ contract Factory is
         IManager.DexConfig[] calldata dexConfigs,
         AirdropParams calldata airdropParams
     ) external nonReentrant returns (address token, address pair) {
-        address assetToken = router.assetToken();
+        IERC20 assetToken = IERC20(router.assetToken());
         
-        (token, pair) = _initializeContracts(
-            name, symbol, url, intention, dexConfigs, assetToken
-        );
+        // Create and configure token
+        IToken agentToken = _createToken(name, symbol, url, intention);
+        pair = _createPair(agentToken, assetToken);
+        manager.registerAgent(address(agentToken), pair, url, intention, dexConfigs);
         
-        uint256 liquiditySupply = _setupAirdropAndFees(token, airdropParams);
+        // Setup token distribution
+        uint256 liquiditySupply = _setupAirdropAndFees(agentToken, airdropParams);
         
+        // Initialize trading
         _setupLiquidityAndTrading(
-            token, assetToken, initialPurchase, liquiditySupply
+            agentToken, assetToken, initialPurchase, liquiditySupply
         );
         
-        emit Launch(token, pair, msg.sender, name, symbol, tokenToAirdrop[token]);
-        return (token, pair);
+        emit Launch(address(agentToken), pair, msg.sender, name, symbol, tokenToAirdrop[address(agentToken)]);
+        return (address(agentToken), pair);
     }
 
+    /*//////////////////////////////////////////////////////////////
+                         INTERNAL SETUP FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
     /**
-     * @notice Creates and links core smart contracts
-     * @dev Deploys token and pair contracts, registers with manager
-     * 
-     * Contract Deployment:
-     * 1. Token Contract:
-     *    - Fixed initial supply
-     *    - Standard ERC20 implementation
-     *    - Tax configuration
-     * 
-     * 2. Bonding Pair:
-     *    - Links token to asset
-     *    - Sets K constant
-     *    - Initializes price curve
-     * 
-     * 3. Manager Integration:
-     *    - Registers token/pair
-     *    - Sets trading configs
-     *    - Enables features
-     * 
-     * Storage:
-     * - Updates pair mappings
-     * - Adds to enumerable list
-     * - Sets contract links
-     * 
+     * @notice Creates new token via factory
      * @param name Token name
      * @param symbol Token symbol
-     * @param url Info URL
+     * @param url Token URL
      * @param intention Token purpose
-     * @param dexConfigs DEX settings
-     * @param assetToken Asset token address
-     * @return token New token address
-     * @return pair New pair address
+     * @return IToken interface to new token
      */
-    function _initializeContracts(
+    function _createToken(
         string calldata name,
         string calldata symbol,
         string calldata url,
-        string calldata intention,
-        IManager.DexConfig[] calldata dexConfigs,
-        address assetToken
-    ) internal returns (address token, address pair) {
-        token = _createToken(name, symbol, url, intention);
-        pair = _createPair(token, assetToken);
-        manager.registerAgent(token, pair, url, intention, dexConfigs);
-        return (token, pair);
+        string calldata intention
+    ) internal returns (IToken) {
+        return IToken(tokenFactory.launch(
+            name,
+            symbol,
+            url,
+            intention,
+            msg.sender
+        ));
     }
 
     /**
-     * @notice Handles token distribution and fee collection
-     * @dev Creates airdrop if enabled, transfers platform fees
-     * 
-     * Airdrop Process:
-     * 1. Validation:
-     *    - Merkle root check
-     *    - Claimant count > 0
-     *    - Valid percentage (0-5%)
-     * 
-     * 2. Supply Allocation:
-     *    - Calculates airdrop amount
-     *    - Updates available supply
-     *    - Transfers to airdrop contract
-     * 
-     * 3. Platform Fee:
-     *    - 1% of total supply
-     *    - Direct transfer to treasury
-     * 
-     * Supply Tracking:
-     * - Maintains accurate token counts
-     * - Updates available liquidity
-     * - Ensures sufficient bonding supply
-     * 
-     * @param token Token contract address
-     * @param airdropParams Airdrop configuration
+     * @notice Creates bonding pair contract
+     * @param agentToken Agent token interface
+     * @param assetToken Asset token interface  
+     * @return pair New pair address
+     */
+    function _createPair(
+        IERC20 agentToken,
+        IERC20 assetToken
+    ) internal returns (address pair) {
+        require(address(agentToken) != address(assetToken), "Identical addresses");
+
+        Pair newPair = new Pair(
+            address(router),
+            address(agentToken),
+            address(assetToken),
+            K
+        );
+        pair = address(newPair);
+
+        getPair[address(agentToken)][address(assetToken)] = pair;
+        getPair[address(assetToken)][address(agentToken)] = pair;
+        allPairs.push(pair);
+        
+        return pair;
+    }
+
+    /**
+     * @notice Sets up airdrop if enabled and collects platform fee
+     * @param agentToken Token to distribute
+     * @param params Airdrop configuration
+     * @return liquiditySupply Remaining supply for liquidity
      */
     function _setupAirdropAndFees(
-        address token,
-        AirdropParams calldata airdropParams
+        IToken agentToken,
+        AirdropParams calldata params
     ) internal returns (uint256) {
-        IERC20 agentToken = IERC20(token);
         uint256 liquiditySupply = agentToken.totalSupply();
         
-        if (airdropParams.claimantCount > 0) {
-            (,uint256 airdropAmount) = _createAirdrop(token, agentToken, airdropParams);
+        if (params.claimantCount > 0) {
+            (,uint256 airdropAmount) = _createAirdrop(agentToken, params);
             liquiditySupply -= airdropAmount;
         }
         
@@ -353,71 +282,60 @@ contract Factory is
     }
 
     /**
-     * @notice Configures trading infrastructure and executes first trade
-     * @dev Sets up liquidity pool and performs initial market trade
-     * 
-     * Setup Process:
-     * 1. Approvals:
-     *    - Router permissions
-     *    - Asset token allowance
-     *    - Trading authorizations
-     * 
-     * 2. Liquidity:
-     *    - Initial pool creation
-     *    - Token pair linking
-     *    - Starting price point
-     * 
-     * 3. First Trade:
-     *    - Path configuration
-     *    - Swap execution
-     *    - Price discovery
-     * 
-     * Market Impact:
-     * - Sets reference price
-     * - Establishes trading depth
-     * - Initializes price curve
-     * 
-     * Security:
-     * - Safe approvals
-     * - Deadline enforcement
-     * - Slippage checks
-     * 
-     * @param token Agent token address
-     * @param assetToken Asset token address
-     * @param initialPurchase First trade size
-     * @param liquiditySupply Initial liquidity pool size
+     * @notice Creates airdrop contract if enabled  
+     * @param agentToken Token to airdrop
+     * @param params Airdrop configuration
+     * @return airdrop New airdrop contract address
+     * @return airdropAmount Tokens allocated for airdrop
+     */
+    function _createAirdrop(
+        IToken agentToken,
+        AirdropParams calldata params
+    ) internal returns (address airdrop, uint256 airdropAmount) {
+        require(params.percentage > 0 && params.percentage <= MAX_AIRDROP_PERCENTAGE, "Invalid percentage");
+        require(params.merkleRoot != bytes32(0), "Invalid merkle root");
+        
+        airdropAmount = (agentToken.totalSupply() * params.percentage) / BASIS_POINTS;
+        
+        Airdrop newAirdrop = new Airdrop(
+            address(agentToken),
+            params.merkleRoot,
+            params.claimantCount
+        );
+        
+        airdrop = address(newAirdrop);
+        tokenToAirdrop[address(agentToken)] = airdrop;
+        agentToken.transfer(airdrop, airdropAmount);
+
+        return (airdrop, airdropAmount);
+    }
+
+    /**
+     * @notice Sets up trading and executes first trade
+     * @param agentToken Agent token interface
+     * @param assetToken Asset token interface
+     * @param initialPurchase Initial trade size
+     * @param liquiditySupply Initial liquidity
      */
     function _setupLiquidityAndTrading(
-        address token,
-        address assetToken,
+        IToken agentToken,
+        IERC20 assetToken,
         uint256 initialPurchase,
         uint256 liquiditySupply
     ) internal {
-        IERC20 agentToken = IERC20(token);
-        IERC20 actualAssetToken = IERC20(assetToken);
-        
-        // Approve router for trading
         agentToken.approve(address(router), type(uint256).max);
-        actualAssetToken.approve(address(router), initialPurchase);
+        assetToken.approve(address(router), initialPurchase);
         
-        // Transfer initial tokens and ETH to pair
-        actualAssetToken.transferFrom(msg.sender, address(this), initialPurchase);
+        assetToken.transferFrom(msg.sender, address(this), initialPurchase);
+        router.addInitialLiquidity(address(agentToken), address(assetToken), liquiditySupply, 0);
         
-        // add initial liquidity
-        router.addInitialLiquidity(token, assetToken, liquiditySupply, 0);
-        
-        // create first purchase path
         address[] memory path = new address[](2);
-        path[0] = assetToken;
-        path[1] = token;
+        path[0] = address(assetToken);
+        path[1] = address(agentToken);
 
-        // ensure initial purchase is max 5% of supply
         uint256[] memory amounts = router.getAmountsOut(initialPurchase, path);
-
-        // check agent amount out is less than 5% of supply
         require(amounts[1] <= (agentToken.totalSupply() * MAX_INITIAL_PURCHASE) / BASIS_POINTS, "Initial purchase too large");
         
-        // do actual first purchase
         router.swapExactTokensForTokens(
             initialPurchase,
             0,
@@ -427,122 +345,13 @@ contract Factory is
         );
     }
 
-    /**
-     * @notice Creates a new token contract with initial supply and configuration
-     * @dev Deploys Token contract and sets up vault mapping
-     * 
-     * The token:
-     * - Has fixed initial supply
-     * - Is linked to a specific tax vault
-     * - Uses router for trading operations
-     * - Implements standard ERC20 functionality
-     * 
-     * @param name Token name for ERC20 metadata
-     * @param symbol Token symbol for ERC20 metadata
-     * @param url URL for additional information
-     * @param intention Token use case or intention
-     * @return token Address of the created token
-     */
-    function _createToken(
-        string calldata name,
-        string calldata symbol,
-        string calldata url,
-        string calldata intention
-    ) internal returns (address token) {
-        // launch with factory
-        address newToken = tokenFactory.launch(
-            name,
-            symbol,
-            url,
-            intention,
-            msg.sender
-        );
-        
-        // Store vault mapping for token
-        return newToken;
-    }
-
-    /**
-     * @notice Creates a new bonding pair for token/asset trading
-     * @dev Implements core bonding curve logic with K constant
-     * 
-     * The bonding pair:
-     * - Uses K constant for price calculations
-     * - Ensures token0 < token1 for consistent ordering
-     * - Prevents duplicate pairs
-     * - Adds pair to enumerable list
-     * 
-     * Price mechanics:
-     * - Buy price = K / current_supply
-     * - Sell price = K / (current_supply + amount)
-     * - Slippage increases with trade size
-     * 
-     * @param agentToken First token in pair (typically AI agent token)
-     * @param assetToken Second token in pair (typically asset token like ETH)
-     * @return pair Address of the created bonding pair
-     */
-    function _createPair(
-        address agentToken,
-        address assetToken
-    ) internal returns (address pair) {
-        require(agentToken != assetToken, "Identical addresses");
-
-        // Create bonding pair with K constant
-        Pair newPair = new Pair(
-            address(router),
-            agentToken,
-            assetToken,
-            K
-        );
-        pair = address(newPair);
-
-        // Store bidirectional pair mappings
-        getPair[agentToken][assetToken] = pair;
-        getPair[assetToken][agentToken] = pair;
-        allPairs.push(pair);
-        
-        return pair;
-    }
-
-    /**
-     * @notice Creates a new airdrop contract for a token
-     * @param token Token address
-     * @param tokenContract Token contract interface
-     * @param params Airdrop parameters
-     */
-    function _createAirdrop(
-        address token,
-        IERC20 tokenContract,
-        AirdropParams calldata params
-    ) internal returns (address airdrop, uint256 airdropAmount) {
-        require(params.percentage > 0 && params.percentage <= MAX_AIRDROP_PERCENTAGE, "Invalid percentage");
-        require(params.merkleRoot != bytes32(0), "Invalid merkle root");
-        
-        airdropAmount = (tokenContract.totalSupply() * params.percentage) / BASIS_POINTS;
-        
-        Airdrop newAirdrop = new Airdrop(
-            token,
-            params.merkleRoot,
-            params.claimantCount
-        );
-        
-        airdrop = address(newAirdrop);
-        tokenToAirdrop[token] = airdrop;
-        tokenContract.transfer(airdrop, airdropAmount);
-
-        return (airdrop, airdropAmount);
-    }
-
     /*//////////////////////////////////////////////////////////////
-                            ADMIN FUNCTIONS
+                            ADMIN FUNCTIONS  
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Updates the K constant for future pairs
-     * @param newK New K value
-     * @dev Changing K affects only future pairs, not existing ones
-     * Higher K = steeper price curve
-     * Lower K = gentler price curve
+     * @notice Updates bonding curve constant
+     * @param newK New K value for price calculation
      */
     function setK(uint256 newK) external onlyRole(ADMIN_ROLE) {
         require(newK > 0, "Invalid K");
@@ -550,29 +359,32 @@ contract Factory is
     }
 
     /**
-     * @notice Updates the platform treasury address
-     * @param newPlatformTreasury New treasury address
+     * @notice Updates fee collection address
+     * @param newPlatformTreasury New treasury address 
      */
     function setPlatformTreasury(address newPlatformTreasury) external onlyRole(ADMIN_ROLE) {
         platformTreasury = newPlatformTreasury;
     }
 
     /**
-     * @notice sets the manager address
+     * @notice Updates manager contract
+     * @param manager_ New manager contract address
      */
     function setManager(address manager_) external onlyRole(ADMIN_ROLE) {
         manager = IManager(manager_);
     }
 
     /**
-     * @notice sets the router address
+     * @notice Updates router contract  
+     * @param router_ New router contract address
      */
     function setRouter(address router_) external onlyRole(ADMIN_ROLE) {
         router = IRouter(router_);
     }
 
     /**
-     * @notice sets the token factory address
+     * @notice Updates token factory contract
+     * @param tokenFactory_ New factory contract address
      */
     function setTokenFactory(address tokenFactory_) external onlyRole(ADMIN_ROLE) {
         tokenFactory = ITokenFactory(tokenFactory_);

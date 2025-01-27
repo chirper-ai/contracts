@@ -13,25 +13,34 @@ import "../../interfaces/IRouter.sol";
  * @title Pair
  * @dev Implements a quadratic bonding curve automated market maker for agent tokens.
  * 
- * The bonding curve uses the formula: price = K / (supply²)
+ * The bonding curve follows the formula: price = K / (supply × 1e18)
  * Where:
- * - K is a constant that determines curve steepness
- * - supply is the current token reserve in the pair
+ * - K is a constant that determines initial pricing and curve steepness
+ * - supply is the current agent token reserve in the pair
+ * - 1e18 is used for fixed-point arithmetic precision
  * 
  * Key mechanics:
- * 1. Price increases quadratically as supply decreases (buying)
- * 2. Price decreases quadratically as supply increases (selling)
- * 3. Square root calculations determine output amounts
- * 4. Graduation threshold triggers when reserve ratio hits target
+ * 1. Price increases as supply decreases (buying) following K/supply ratio
+ * 2. Price decreases as supply increases (selling) following same ratio
+ * 3. Initial purchase uses special case formula: output = (assetIn × agentReserve) / (K × 1e18)
+ * 4. Subsequent trades use formulas:
+ *    Buy: newReserveAgent = (reserveAgent × reserveAsset) / (reserveAsset + assetIn)
+ *    Sell: newReserveAsset = (reserveAsset × scaledK) / reserveAgent
+ *          where scaledK = (K × 1e18) / (reserveAgent + agentIn)
+ * 5. Trading stops when agent token graduates
  * 
  * Example:
- * - K = 1e18, supply = 1e6 tokens
- * - Initial price = 1e18 / (1e6)² = 1e6 asset tokens per token
- * - After buying to reduce supply to 9e5:
- *   New price = 1e18 / (9e5)² ≈ 1.23e6 (23% increase)
+ * - K = 1e18
+ * - Initial state: reserveAgent = 1e6, reserveAsset = 1e6
+ * - Buy 1e5 asset tokens:
+ *   newReserveAgent = (1e6 × 1e6) / (1e6 + 1e5) ≈ 9.09e5
+ *   agentOut = 1e6 - 9.09e5 ≈ 9.1e4
  * 
- * Buy formula: newReserveAgent = sqrt(K / newReserveAsset)
- * Sell formula: newReserveAsset = K / (newReserveAgent²)
+ * Safety:
+ * - Uses SafeERC20 for token transfers
+ * - Includes reentrancy protection
+ * - Validates all inputs and state changes
+ * - Only router can execute trades
  */
 contract Pair is ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -40,28 +49,28 @@ contract Pair is ReentrancyGuard {
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice The bonding curve constant K
+    /// @notice The bonding curve constant K that determines pricing
     uint256 public immutable K;
 
-    /// @notice The factory that created this pair
+    /// @notice The factory contract that deployed this pair
     address public immutable factory;
 
-    /// @notice The router contract that handles trading
+    /// @notice The router contract authorized to execute trades
     address public immutable router;
 
-    /// @notice The agent token in the pair
+    /// @notice The agent token being traded in the pair
     address public immutable agentToken;
 
-    /// @notice The asset token in the pair (e.g., USDC)
+    /// @notice The asset token used for purchases (e.g., USDC)
     address public immutable assetToken;
 
-    /// @notice Reserve of agent tokens
+    /// @notice Current reserve of agent tokens held by pair
     uint256 private reserveAgent;
 
-    /// @notice Reserve of asset tokens
+    /// @notice Current reserve of asset tokens held by pair
     uint256 private reserveAsset;
 
-    /// @notice Block timestamp of last swap
+    /// @notice Timestamp of last reserve update for tracking purposes
     uint32 private blockTimestampLast;
 
     /*//////////////////////////////////////////////////////////////
@@ -69,19 +78,19 @@ contract Pair is ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Emitted when reserves are updated
-     * @param reserveAgent New agent token reserve
-     * @param reserveAsset New asset token reserve
+     * @notice Emitted when token reserves are updated
+     * @param reserveAgent New reserve of agent tokens
+     * @param reserveAsset New reserve of asset tokens
      */
     event ReservesUpdated(uint256 reserveAgent, uint256 reserveAsset);
 
     /**
-     * @notice Emitted when tokens are swapped
-     * @param sender Address initiating the swap
-     * @param agentAmountIn Amount of agent tokens in (if selling)
-     * @param assetAmountIn Amount of asset tokens in (if buying)
-     * @param agentAmountOut Amount of agent tokens out (if buying)
-     * @param assetAmountOut Amount of asset tokens out (if selling)
+     * @notice Emitted when a swap is executed
+     * @param sender Address that initiated the swap via router 
+     * @param agentAmountIn Amount of agent tokens sent to pair (selling)
+     * @param assetAmountIn Amount of asset tokens sent to pair (buying)
+     * @param agentAmountOut Amount of agent tokens sent from pair (buying)
+     * @param assetAmountOut Amount of asset tokens sent from pair (selling)
      */
     event Swap(
         address indexed sender,
@@ -95,7 +104,7 @@ contract Pair is ReentrancyGuard {
                                 MODIFIERS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Ensures caller is the router contract
+    /// @notice Restricts function access to router contract only
     modifier onlyRouter() {
         require(msg.sender == router, "Only router");
         _;
@@ -106,11 +115,11 @@ contract Pair is ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Creates a new bonding pair
-     * @param router_ Router contract address
-     * @param agentToken_ Agent token address
-     * @param assetToken_ Asset token address
-     * @param k_ Bonding curve constant
+     * @notice Initializes a new bonding curve pair
+     * @param router_ Address of authorized router contract
+     * @param agentToken_ Address of agent token to trade
+     * @param assetToken_ Address of asset token for purchases
+     * @param k_ Bonding curve constant for price calculations
      */
     constructor(
         address router_,
@@ -135,13 +144,17 @@ contract Pair is ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Executes a swap according to bonding curve formula
-     * @dev Called by Router to execute trades
-     * Can be either:
+     * @notice Executes token swap according to bonding curve formula
+     * @dev Only callable by router contract
+     * Handles two types of swaps:
      * 1. Asset tokens in -> Agent tokens out (buying)
      * 2. Agent tokens in -> Asset tokens out (selling)
-     * @param agentAmountIn Amount of agent tokens being sold
-     * @param assetAmountIn Amount of asset tokens being spent
+     * Reverts if:
+     * - Agent token has graduated
+     * - Invalid input amounts
+     * - Slippage exceeds limits
+     * @param agentAmountIn Amount of agent tokens to sell
+     * @param assetAmountIn Amount of asset tokens to spend
      * @param agentAmountOut Minimum agent tokens to receive
      * @param assetAmountOut Minimum asset tokens to receive
      */
@@ -168,7 +181,6 @@ contract Pair is ReentrancyGuard {
             agentAmountOut = actualAgentOut;
             assetAmountOut = 0;
         } else {
-            // Selling agent tokens  
             uint256 actualAssetOut = _getAssetAmountOut(agentAmountIn);
             require(actualAssetOut >= assetAmountOut, "Insufficient output");
             _updateReserves(
@@ -189,7 +201,9 @@ contract Pair is ReentrancyGuard {
     }
 
     /**
-     * @notice Synchronizes reserves with current balances
+     * @notice Updates reserves to match current token balances
+     * @dev Only callable by router contract
+     * Used to handle direct token transfers to pair
      */
     function sync() external nonReentrant onlyRouter {
         uint256 agentBalance_ = IERC20(agentToken).balanceOf(address(this));
@@ -198,9 +212,11 @@ contract Pair is ReentrancyGuard {
     }
 
     /**
-     * @notice Transfers tokens from the pair
-     * @param to Address to transfer to
-     * @param amount Amount to transfer
+     * @notice Transfers agent tokens from pair to recipient
+     * @dev Only callable by router contract
+     * Uses SafeERC20 for transfer
+     * @param to Address to receive tokens
+     * @param amount Number of tokens to transfer
      */
     function transferTo(
         address to,
@@ -210,9 +226,11 @@ contract Pair is ReentrancyGuard {
     }
 
     /**
-     * @notice Transfers asset tokens from the pair
-     * @param to Address to transfer to
-     * @param amount Amount to transfer
+     * @notice Transfers asset tokens from pair to recipient
+     * @dev Only callable by router contract
+     * Uses SafeERC20 for transfer
+     * @param to Address to receive tokens
+     * @param amount Number of tokens to transfer
      */
     function transferAsset(
         address to,
@@ -222,10 +240,13 @@ contract Pair is ReentrancyGuard {
     }
 
     /**
-     * @notice Approves router to spend tokens
-     * @param spender Address to approve
-     * @param token Token to approve
-     * @param amount Amount to approve
+     * @notice Approves spender to transfer tokens from pair
+     * @dev Only callable by router contract
+     * Only allows approval of pair's agent or asset token
+     * Uses forceApprove for safety
+     * @param spender Address to grant approval
+     * @param token Token address to approve
+     * @param amount Number of tokens to approve
      */
     function approval(
         address spender,
@@ -244,10 +265,10 @@ contract Pair is ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Returns current reserves
-     * @return Agent token reserve
-     * @return Asset token reserve
-     * @return Last update timestamp
+     * @notice Returns current state of pair
+     * @return reserveAgent Current agent token reserve
+     * @return reserveAsset Current asset token reserve
+     * @return blockTimestampLast Timestamp of last reserve update
      */
     function getReserves() external view returns (
         uint256,
@@ -258,9 +279,10 @@ contract Pair is ReentrancyGuard {
     }
 
     /**
-     * @notice Calculates output amount of agent tokens for given input of asset tokens
+     * @notice Calculates agent tokens received for asset tokens input
+     * @dev Uses different formulas for initial vs subsequent purchases
      * @param assetAmountIn Amount of asset tokens to spend
-     * @return Amount of agent tokens received
+     * @return Amount of agent tokens to receive
      */
     function getAgentAmountOut(
         uint256 assetAmountIn
@@ -269,9 +291,10 @@ contract Pair is ReentrancyGuard {
     }
 
     /**
-     * @notice Calculates output amount of asset tokens for given input of agent tokens
+     * @notice Calculates asset tokens received for agent tokens input
+     * @dev Uses scaled K formula accounting for reserve changes
      * @param agentAmountIn Amount of agent tokens to sell
-     * @return Amount of asset tokens received
+     * @return Amount of asset tokens to receive
      */
     function getAssetAmountOut(
         uint256 agentAmountIn
@@ -284,9 +307,10 @@ contract Pair is ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Updates reserves and timestamp
-     * @param newReserveAgent New agent token reserve
-     * @param newReserveAsset New asset token reserve
+     * @notice Updates pair reserves and last update timestamp
+     * @dev Emits ReservesUpdated event
+     * @param newReserveAgent New agent token reserve amount
+     * @param newReserveAsset New asset token reserve amount
      */
     function _updateReserves(
         uint256 newReserveAgent,
@@ -300,9 +324,11 @@ contract Pair is ReentrancyGuard {
     }
 
     /**
-     * @notice Calculates agent tokens received for asset tokens spent
-     * @param assetAmountIn Amount of asset tokens to spend
-     * @return Amount of agent tokens received
+     * @notice Internal calculation of agent tokens output
+     * @dev Handles initial purchase as special case
+     * For subsequent purchases: newReserve = (reserveAgent × reserveAsset) / (reserveAsset + input)
+     * @param assetAmountIn Amount of asset tokens input
+     * @return Amount of agent tokens to output
      */
     function _getAgentAmountOut(uint256 assetAmountIn) private view returns (uint256) {
         if (reserveAsset == 0) {
@@ -316,9 +342,12 @@ contract Pair is ReentrancyGuard {
     }
 
     /**
-     * @notice Calculates asset tokens received for agent tokens spent
-     * @param agentAmountIn Amount of agent tokens to sell
-     * @return Amount of asset tokens received
+     * @notice Internal calculation of asset tokens output
+     * @dev Uses scaled K to maintain price curve
+     * Formula: newReserve = (reserveAsset × scaledK) / reserveAgent
+     * where scaledK = (K × 1e18) / (reserveAgent + input)
+     * @param agentAmountIn Amount of agent tokens input
+     * @return Amount of asset tokens to output
      */
     function _getAssetAmountOut(uint256 agentAmountIn) private view returns (uint256) {
         uint256 scaledK = (K * 1e18) / (reserveAgent + agentAmountIn);

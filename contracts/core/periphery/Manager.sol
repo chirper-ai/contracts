@@ -9,37 +9,49 @@ import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-// Uniswap V2
 import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
 import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
-
-// Uniswap V3
 import "../../interfaces/UniswapV3/IUniswapV3Pool.sol";
 import "../../interfaces/UniswapV3/IUniswapV3Factory.sol";
 import "../../interfaces/UniswapV3/INonfungiblePositionManager.sol";
-
-// Velodrome
 import "../../interfaces/Velodrome/IVelodromeRouter.sol";
 import "../../interfaces/Velodrome/IVelodromeFactory.sol";
-
-// Local interfaces
 import "../../interfaces/IRouter.sol";
 import "../../interfaces/IFactory.sol";
 import "../../interfaces/IPair.sol";
 import "../../interfaces/IToken.sol";
-
-// tick math
 import "../../libraries/TickMath.sol";
 
 /**
  * @title Manager
- * @dev Manages the lifecycle of AI agent tokens and handles graduation to DEXes.
+ * @dev Orchestrates token graduation from bonding curves to DEX trading
  * 
- * This contract is responsible for:
- * 1. Token lifecycle and information tracking
- * 2. Graduation process orchestration
- * 3. DEX deployment and liquidity management
- * 4. Token state management
+ * Core Functionality:
+ * 1. Token Lifecycle Management
+ *    - Tracks token metadata and configuration
+ *    - Monitors graduation readiness
+ *    - Manages token state transitions
+ * 
+ * 2. Graduation Process
+ *    - Triggered when token reserve ratio <= threshold
+ *    - Migrates liquidity from bonding curve
+ *    - Deploys to multiple DEXes based on weights
+ *    - Supports Uniswap V2/V3 and Velodrome
+ * 
+ * 3. DEX Integration
+ *    - Custom deployment logic per DEX type
+ *    - Optimal liquidity distribution
+ *    - Automatic pool creation and initialization
+ * 
+ * Example Graduation Flow:
+ * 1. Token reaches 50% reserve ratio
+ * 2. Router triggers graduation
+ * 3. Bonding curve liquidity withdrawn
+ * 4. Distributed to DEXes: 
+ *    - 40% to Uniswap V3 (0.3% fee tier)
+ *    - 30% to Uniswap V2
+ *    - 30% to Velodrome
+ * 5. Token unlocked for DEX trading
  */
 contract Manager is 
     Initializable, 
@@ -52,11 +64,11 @@ contract Manager is
                                  ENUMS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Supported DEX types for graduation
+    /// @notice Supported DEX protocols
     enum DexType {
-        UniswapV2,
-        UniswapV3,
-        Velodrome
+        UniswapV2,   // Standard AMM pools
+        UniswapV3,   // Concentrated liquidity pools
+        Velodrome    // Solidly-style pools
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -64,11 +76,11 @@ contract Manager is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Configuration for a DEX deployment
-     * @param router Router contract address
-     * @param fee Fee tier (for UniswapV3)
-     * @param weight Liquidity allocation weight (basis points)
-     * @param dexType Type of DEX
+     * @notice DEX deployment parameters
+     * @param router Protocol router/manager address
+     * @param fee Liquidity pool fee tier (UniV3)
+     * @param weight Percentage of total liquidity (basis points)
+     * @param dexType Protocol identifier
      */
     struct DexConfig {
         address router;
@@ -78,13 +90,14 @@ contract Manager is
     }
 
     /**
-     * @notice Token information and configuration
-     * @param creator Token creator address
-     * @param intention Token purpose/description
-     * @param url Reference URL
-     * @param bondingPair Associated bonding pair
-     * @param dexConfigs DEX deployment settings
-     * @param dexPools Deployed DEX pool addresses
+     * @notice Token registration and tracking data
+     * @param creator Token deployer address
+     * @param intention Token purpose description
+     * @param url Project documentation URL
+     * @param bondingPair Initial trading pair address
+     * @param mainPool Primary DEX pool post-graduation 
+     * @param dexConfigs Distribution parameters for graduation
+     * @param dexPools Active DEX pool addresses
      */
     struct AgentProfile {
         address creator;
@@ -100,29 +113,29 @@ contract Manager is
                                 CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Role identifier for administrative operations
+    /// @notice Administrative access control
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
 
-    /// @notice Basis points denominator for percentage calculations
+    /// @notice Basis points scaling (100%)
     uint256 private constant BASIS_POINTS = 100_000;
 
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Factory contract reference
+    /// @notice Token factory contract
     IFactory public factory;
 
-    /// @notice Asset token used for trading
+    /// @notice Trading pair denominator token
     address public assetToken;
 
-    /// @notice Graduation threshold for bonding pair liquidity
+    /// @notice Required reserve ratio for graduation (%)
     uint256 public gradThreshold;
 
-    /// @notice Maps token addresses to their information
+    /// @notice Token data storage
     mapping(address => AgentProfile) public agentProfile;
 
-    /// @notice List of all launched tokens
+    /// @notice Registered token list
     address[] public allAgents;
 
     /*//////////////////////////////////////////////////////////////
@@ -130,11 +143,11 @@ contract Manager is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Emitted when an agents information is registered
-     * @param token Agent address
-     * @param creator Agent creator
-     * @param intention Agent purpose
-     * @param url Reference URL
+     * @notice Token registration completed
+     * @param token Token contract address
+     * @param creator Token owner address
+     * @param intention Project description
+     * @param url Documentation link
      */
     event AgentRegistered(
         address indexed token,
@@ -144,9 +157,9 @@ contract Manager is
     );
 
     /**
-     * @notice Emitted when an agent graduates to DEX trading
-     * @param token Agent address
-     * @param pools Array of deployed DEX pools
+     * @notice Token graduated to DEX trading
+     * @param token Token contract address
+     * @param pools Active DEX pool addresses
      */
     event AgentGraduated(
         address indexed token,
@@ -167,10 +180,10 @@ contract Manager is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Initializes the manager contract
-     * @param factory_ Factory contract address
-     * @param assetToken_ Asset token address
-     * @param gradThreshold_ Graduation reserve ratio threshold
+     * @notice Configures contract parameters
+     * @param factory_ Token factory address
+     * @param assetToken_ Quote token address
+     * @param gradThreshold_ Target reserve ratio
      */
     function initialize(
         address factory_,
@@ -196,12 +209,12 @@ contract Manager is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Registers a new token's information
+     * @notice Stores token configuration
      * @param token Token address
-     * @param bondingPair Bonding pair address
-     * @param url Reference URL
-     * @param intention Token purpose
-     * @param _dexConfigs DEX deployment configurations
+     * @param bondingPair Trading pair address
+     * @param url Documentation URL
+     * @param intention Token description
+     * @param _dexConfigs Graduation parameters
      */
     function registerAgent(
         address token,
@@ -213,7 +226,6 @@ contract Manager is
         require(msg.sender == address(factory), "Only factory");
         require(agentProfile[token].creator == address(0), "Already registered");
 
-        // Validate DEX configs
         uint24 totalWeight;
         for (uint i = 0; i < _dexConfigs.length; i++) {
             require(_dexConfigs[i].router != address(0), "Invalid router");
@@ -226,7 +238,6 @@ contract Manager is
         }
         require(totalWeight == BASIS_POINTS, "Invalid weights");
 
-        // Store token information
         agentProfile[token] = AgentProfile({
             creator: tx.origin,
             url: url,
@@ -237,77 +248,57 @@ contract Manager is
             dexPools: new address[](0)
         });
 
-        // all agents
         allAgents.push(token);
-
-        // emit registration event
         emit AgentRegistered(token, tx.origin, intention, url);
     }
 
     /**
-     * @notice Checks if token should graduate based on reserve ratio
-     * @param token Agent token address
-     * @return shouldGraduate True if graduation conditions are met
-     * @return reserveRatio Current reserve ratio if available
+     * @notice Evaluates graduation eligibility
+     * @param token Token address
+     * @return shouldGraduate Graduation status
+     * @return reserveRatio Current ratio
      */
     function checkGraduation(
         address token
     ) external view returns (bool shouldGraduate, uint256 reserveRatio) {
         AgentProfile storage info = agentProfile[token];
-        
-        // Already graduated
-        if (info.dexPools.length > 0) {
-            return (false, 0);
-        }
+        if (info.dexPools.length > 0) return (false, 0);
 
-        // Get bonding pair info
         IPair pair = IPair(info.bondingPair);
         (uint256 reserveAgent,,) = pair.getReserves();
-        
-        // Calculate reserve ratio
         uint256 totalSupply = IERC20(token).totalSupply();
-        if (totalSupply == 0 || reserveAgent == 0) {
-            return (false, 0);
-        }
+        
+        if (totalSupply == 0 || reserveAgent == 0) return (false, 0);
 
         reserveRatio = (reserveAgent * BASIS_POINTS) / totalSupply;
-
-        // return graduation conditions
         return (reserveRatio <= gradThreshold, reserveRatio);
     }
 
     /**
-     * @notice Handles the graduation process for a token
+     * @notice Executes graduation process
      * @param token Token address
      */
     function graduate(address token) external nonReentrant {
-        AgentProfile storage info = agentProfile[token];
         require(msg.sender == factory.router(), "Only router");
+        
+        AgentProfile storage info = agentProfile[token];
         require(info.dexPools.length == 0, "Already graduated");
 
-        // Get bonding pair liquidity
         IPair pair = IPair(info.bondingPair);
         (uint256 tokenBalance, uint256 assetBalance,) = pair.getReserves();
+        require(tokenBalance > 0 && assetBalance > 0, "Insufficient liquidity");
 
-        require(
-            tokenBalance > 0 && assetBalance > 0,
-            "Insufficient liquidity"
-        );
-
-        // Transfer tokens from bonding pair
+        // Transfer liquidity
         IRouter(factory.router()).transferLiquidityToManager(
             token,
             tokenBalance,
             assetBalance
         );
 
-        // Deploy to configured DEXes
+        // Deploy to DEXes
         address[] memory pools = new address[](info.dexConfigs.length);
-
         for (uint i = 0; i < info.dexConfigs.length; i++) {
             DexConfig memory config = info.dexConfigs[i];
-            
-            // Calculate proportional liquidity
             uint256 tokenAmount = (tokenBalance * config.weight) / BASIS_POINTS;
             uint256 assetAmount = (assetBalance * config.weight) / BASIS_POINTS;
 
@@ -337,7 +328,6 @@ contract Manager is
             }
         }
 
-        // Update token state
         info.dexPools = pools;
         info.mainPool = pools[0];
         IToken(token).graduate(pools);
@@ -350,9 +340,9 @@ contract Manager is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Returns a token's DEX pool addresses
+     * @notice Retrieves DEX pool addresses
      * @param token Token address
-     * @return Pool addresses
+     * @return Active pool addresses
      */
     function getDexPools(
         address token
@@ -361,23 +351,19 @@ contract Manager is
     }
 
     /**
-     * @notice Returns a token's bonding pair pool addresses
+     * @notice Gets bonding pair address
      * @param token Token address
-     * @return address
+     * @return Pair address
      */
     function getBondingPair(
         address token
     ) external view returns (address) {
-        // get agent profile
-        AgentProfile storage info = agentProfile[token];
-
-        // return bonding pair
-        return info.bondingPair;
+        return agentProfile[token].bondingPair;
     }
 
     /**
-     * @notice Returns total number of registered tokens
-     * @return Token count
+     * @notice Counts registered tokens
+     * @return Total token count
      */
     function tokenCount() external view returns (uint256) {
         return allAgents.length;
@@ -389,7 +375,7 @@ contract Manager is
 
     /**
      * @notice Updates graduation threshold
-     * @param gradThreshold_ New threshold
+     * @param gradThreshold_ New threshold value
      */
     function setGradThreshold(
         uint256 gradThreshold_
@@ -402,11 +388,11 @@ contract Manager is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Deploys liquidity to Uniswap V2
+     * @notice Deploys to Uniswap V2
      * @param token Token address
-     * @param routerAddress V2 router address
-     * @param tokenAmount Token liquidity amount
-     * @param assetAmount Asset token liquidity amount
+     * @param routerAddress Router contract
+     * @param tokenAmount Token liquidity
+     * @param assetAmount Asset liquidity
      * @return pool Pool address
      */
     function _deployToV2(
@@ -418,13 +404,11 @@ contract Manager is
         IUniswapV2Router02 dexRouter = IUniswapV2Router02(routerAddress);
         IUniswapV2Factory dexFactory = IUniswapV2Factory(dexRouter.factory());
 
-        // Get or create pool
         pool = dexFactory.getPair(token, assetToken);
         if (pool == address(0)) {
             pool = dexFactory.createPair(token, assetToken);
         }
 
-        // Approve and add liquidity
         IERC20(token).forceApprove(routerAddress, tokenAmount);
         IERC20(assetToken).forceApprove(routerAddress, assetAmount);
 
@@ -443,11 +427,11 @@ contract Manager is
     }
 
     /**
-     * @notice Deploys liquidity to Uniswap V3
+     * @notice Deploys to Uniswap V3 (continued)
      * @param token Token address
-     * @param routerAddress V3 position manager address
-     * @param tokenAmount Token liquidity amount
-     * @param assetAmount Asset token liquidity amount
+     * @param routerAddress Position manager
+     * @param tokenAmount Token liquidity
+     * @param assetAmount Asset liquidity
      * @param fee Pool fee tier
      * @return pool Pool address
      */
@@ -461,11 +445,9 @@ contract Manager is
         INonfungiblePositionManager posManager = INonfungiblePositionManager(routerAddress);
         IUniswapV3Factory v3Factory = IUniswapV3Factory(posManager.factory());
 
-        // Sort tokens and amounts
         (address token0, address token1) = token < assetToken ? (token, assetToken) : (assetToken, token);
         (uint256 amount0, uint256 amount1) = token < assetToken ? (tokenAmount, assetAmount) : (assetAmount, tokenAmount);
 
-        // Get or create pool
         pool = v3Factory.getPool(token0, token1, fee);
         
         if (pool == address(0)) {
@@ -479,16 +461,15 @@ contract Manager is
             IUniswapV3Pool(pool).initialize(sqrtPriceX96);
         }
 
-        // Approve tokens
         IERC20(token0).forceApprove(address(posManager), amount0);
         IERC20(token1).forceApprove(address(posManager), amount1);
 
-        // Calculate ticks
+        // Calculate full range ticks
         int24 tickSpacing = IUniswapV3Pool(pool).tickSpacing();
         int24 tickLower = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
         int24 tickUpper = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
 
-        // Mint position
+        // Mint full range position
         posManager.mint(
             INonfungiblePositionManager.MintParams({
                 token0: token0,
@@ -509,11 +490,11 @@ contract Manager is
     }
 
     /**
-     * @notice Deploys liquidity to Velodrome
+     * @notice Deploys to Velodrome
      * @param token Token address
-     * @param routerAddress Velodrome router address
-     * @param tokenAmount Token liquidity amount
-     * @param assetAmount Asset token liquidity amount
+     * @param routerAddress Router contract
+     * @param tokenAmount Token liquidity
+     * @param assetAmount Asset liquidity
      * @return pool Pool address
      */
     function _deployToVelo(
@@ -525,18 +506,16 @@ contract Manager is
         IVelodromeRouter router = IVelodromeRouter(routerAddress);
         IVelodromeFactory veloFactory = IVelodromeFactory(router.factory());
 
-        // Approve tokens to router
         IERC20(token).forceApprove(routerAddress, tokenAmount);
         IERC20(assetToken).forceApprove(routerAddress, assetAmount);
 
-        // Get or create pool (use volatile pool)
+        // Use volatile pool type
         bool stable = false;
         pool = veloFactory.getPair(token, assetToken, stable);
         if (pool == address(0)) {
             pool = veloFactory.createPair(token, assetToken, stable);
         }
 
-        // Add liquidity
         router.addLiquidity(
             token,
             assetToken,

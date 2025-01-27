@@ -7,70 +7,81 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-// interfaces
 import "../../interfaces/IRouter.sol";
 import "../../interfaces/IManager.sol";
 
 /**
  * @title Token
- * @dev Implementation of an AI agent token with tax and graduation mechanics.
+ * @dev ERC20 token implementation for AI agents with tax and graduation mechanics.
  * 
- * The token has three key features:
- * 1. Tax collection on trades
- *    - Buy tax: Fee charged when buying from bonding curve
- *    - Sell tax: Fee charged when selling to bonding curve
- *    - Taxes are split between tax vault and token admin
+ * Core features:
+ * 1. Tax System
+ *    - Buy tax: Percentage fee on bonding curve purchases and DEX buys
+ *    - Sell tax: Percentage fee on bonding curve sales and DEX sells
+ *    - Tax distribution: Split 50-50 between creator and platform treasury
+ *    - Tax exemptions: Configurable per address by owner
+ *    - No tax on direct wallet transfers
  * 
- * 2. Graduation state
- *    - Initially trades through bonding curve
- *    - After graduation, trades through standard DEXes
- *    - Graduation is one-way and permanent
+ * 2. Trading Phases
+ *    - Pre-graduation: Trades exclusively through bonding curve
+ *    - Post-graduation: Trades through whitelisted DEX pools
+ *    - Graduation is permanent and managed by manager contract
  * 
- * 3. Max transaction limits
- *    - Prevents large price impacts
- *    - Different limits for buys and sells
- *    - Applies only pre-graduation
+ * 3. Security Features
+ *    - Reentrancy protection on state-changing operations
+ *    - Input validation on all parameters
+ *    - Immutable core parameters
+ *    - Zero address checks
+ * 
+ * Example tax calculation:
+ * - Transfer amount: 1000 tokens
+ * - Buy tax: 1% (1000 basis points)
+ * - Tax amount = 1000 * 1000 / 100000 = 10 tokens
+ * - Creator receives: 5 tokens
+ * - Treasury receives: 5 tokens
+ * - Recipient receives: 990 tokens
  */
 contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     /*//////////////////////////////////////////////////////////////
                                 CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Basis points denominator for percentage calculations (100%)
+    /// @notice Denominator for basis point calculations (100%)
+    /// @dev Used to convert basis points to percentages (e.g., 1000 bp = 1%)
     uint256 private constant BASIS_POINTS = 100_000;
 
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Token URL for metadata
+    /// @notice Reference URL for token metadata and documentation
     string public url;
 
-    /// @notice Token intention for metadata
+    /// @notice Description of token's intended use case
     string public intention;
 
-    /// @notice Buy tax rate in basis points
+    /// @notice Tax rate for buy operations in basis points (1000 = 1%)
     uint256 public immutable buyTax;
 
-    /// @notice Sell tax rate in basis points
+    /// @notice Tax rate for sell operations in basis points (1000 = 1%)
     uint256 public immutable sellTax;
 
-    /// @notice Address where tax is collected
+    /// @notice Address receiving 50% of collected taxes
     address public creator;
 
-    /// @notice Address where platform fees are collected
+    /// @notice Address receiving remaining 50% of taxes
     address public immutable platformTreasury;
 
-    /// @notice Manager contract that manages graduation
+    /// @notice Contract controlling graduation process
     address public immutable manager;
 
-    /// @notice Whether token has graduated to DEX trading
+    /// @notice Indicates if token has moved to DEX trading phase
     bool public hasGraduated;
 
-    /// @notice Maps addresses that are excluded from taxes
+    /// @notice Addresses exempted from tax collection
     mapping(address => bool) public isTaxExempt;
 
-    /// @notice Maps liquidity pool addresses
+    /// @notice Whitelisted DEX pool addresses post-graduation
     mapping(address => bool) public isPool;
 
     /*//////////////////////////////////////////////////////////////
@@ -78,36 +89,36 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Emitted when token graduates to DEX trading
-     * @param pools Array of DEX pool addresses
+     * @notice Indicates transition to DEX trading phase
+     * @param pools Authorized DEX pool addresses
      */
     event Graduated(address[] pools);
 
     /**
-     * @notice Emitted when tax parameters are updated
-     * @param buyTax_ New buy tax rate
-     * @param sellTax_ New sell tax rate
+     * @notice Records tax parameter updates
+     * @param buyTax_ Updated buy tax rate
+     * @param sellTax_ Updated sell tax rate
      */
     event TaxUpdated(uint256 buyTax_, uint256 sellTax_);
 
     /**
-     * @notice Emitted when a pool status is updated
-     * @param pool Pool address
-     * @param isPool Whether address is a pool
+     * @notice Tracks changes to pool whitelist
+     * @param pool DEX pool address
+     * @param isPool Authorization status
      */
     event PoolUpdated(address indexed pool, bool isPool);
 
     /**
-     * @notice Emitted when tax exemption status is updated
-     * @param account Account address
-     * @param isExempt Whether account is tax exempt
+     * @notice Records tax exemption changes
+     * @param account Modified address
+     * @param isExempt New exemption status
      */
     event TaxExemptUpdated(address indexed account, bool isExempt);
 
     /**
-     * @notice Emitted when transaction limit exemption is updated
-     * @param account Account address
-     * @param isExempt Whether account is exempt from limits
+     * @notice Tracks transaction limit exemption changes
+     * @param account Modified address
+     * @param isExempt New exemption status
      */
     event TxLimitExemptUpdated(address indexed account, bool isExempt);
 
@@ -116,16 +127,16 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Creates a new AI agent token
-     * @param name_ Token name
-     * @param symbol_ Token symbol
-     * @param initialSupply_ Initial supply in whole tokens
-     * @param url_ Token URL for metadata
-     * @param intention_ Token intention for metadata
-     * @param manager_ Manager contract address
-     * @param creator_ Tax collection address
-     * @param platformTreasury_ Platform fee collection address
-     * @dev Initial tax rates and transaction limits can be set by admin later
+     * @notice Deploys and configures token contract
+     * @param name_ ERC20 token name
+     * @param symbol_ ERC20 token symbol
+     * @param initialSupply_ Starting token supply (in standard units)
+     * @param url_ Metadata URL
+     * @param intention_ Token purpose description
+     * @param manager_ Graduation manager address
+     * @param creator_ Tax recipient address
+     * @param platformTreasury_ Platform tax recipient address
+     * @dev Sets default 1% tax rates and exempts contract + deployer
      */
     constructor(
         string memory name_,
@@ -146,15 +157,12 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
         creator = creator_;
         platformTreasury = platformTreasury_;
 
-        // Setup default parameters
-        buyTax = 1000;        // 1% default buy tax
-        sellTax = 1000;       // 1% default sell tax
+        buyTax = 1000;
+        sellTax = 1000;
 
-        // Default exemptions
         isTaxExempt[address(this)] = true;
         isTaxExempt[msg.sender] = true;
 
-        // Mint initial supply
         _mint(msg.sender, initialSupply_);
     }
 
@@ -163,9 +171,9 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Sets token graduation state and registers DEX pools
-     * @param pools Array of DEX pool addresses
-     * @dev Can only be called by manager and only once
+     * @notice Transitions token to DEX trading phase
+     * @param pools Authorized DEX pool addresses
+     * @dev Only callable once by manager contract
      */
     function graduate(address[] calldata pools) external nonReentrant {
         require(msg.sender == manager, "Only manager");
@@ -188,9 +196,10 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Updates tax exemption status for an address
-     * @param account Account to update
-     * @param isExempt Whether account should be tax exempt
+     * @notice Configures tax exemption status
+     * @param account Target address
+     * @param isExempt Exemption flag
+     * @dev Restricted to contract owner
      */
     function setTaxExempt(address account, bool isExempt) external onlyOwner {
         require(account != address(0), "Invalid address");
@@ -203,28 +212,27 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Calculates tax amount for a transfer
-     * @param from Sender address
-     * @param to Recipient address
+     * @notice Computes tax for transfer operation
+     * @param from Source address
+     * @param to Destination address
      * @param amount Transfer amount
      * @return Tax amount to deduct
+     * @dev Applies tax based on:
+     * 1. Exemption status of addresses
+     * 2. Graduation state
+     * 3. Transfer type (buy/sell/transfer)
      */
     function _calculateTax(
         address from,
         address to,
         uint256 amount
     ) private view returns (uint256) {
-        // Skip tax for exempt addresses
         if (isTaxExempt[from] || isTaxExempt[to]) {
             return 0;
         }
 
-        // if not graduated
         if (!hasGraduated) {
-            // pair address
             address pair = IManager(manager).getBondingPair(address(this));
-
-            // check from
             if (pair == from) {
                 return (amount * buyTax) / BASIS_POINTS;
             } else if (pair == to) {
@@ -232,34 +240,34 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
             }
         }
 
-        // Apply appropriate tax based on transfer type
         if (isPool[from]) {
-            return (amount * buyTax) / BASIS_POINTS;  // Buying
+            return (amount * buyTax) / BASIS_POINTS;
         } else if (isPool[to]) {
-            return (amount * sellTax) / BASIS_POINTS; // Selling
+            return (amount * sellTax) / BASIS_POINTS;
         }
 
-        // No tax on wallet transfers
         return 0;
     }
 
     /**
-     * @notice Override of ERC20 _update to implement taxes
-     * @dev Collects tax and enforces transaction limits
-     * @param from Sender address
-     * @param to Recipient address
+     * @notice Enhanced ERC20 transfer logic with tax handling
+     * @param from Source address
+     * @param to Destination address
      * @param amount Transfer amount
+     * @dev Tax workflow:
+     * 1. Calculate applicable tax
+     * 2. Split tax between creator and treasury
+     * 3. Deduct tax from transfer amount
+     * 4. Execute final transfer
      */
     function _update(
         address from,
         address to,
         uint256 amount
     ) internal override {
-        // Calculate and collect tax
         uint256 taxAmount = _calculateTax(from, to, amount);
         
         if (taxAmount > 0) {
-            // send half tax each to creator and platformTreasury
             uint256 halfTax = taxAmount / 2;
             super._update(from, creator, halfTax);
             super._update(from, platformTreasury, taxAmount - halfTax);

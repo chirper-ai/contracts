@@ -10,21 +10,38 @@ import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /**
  * @title Airdrop
- * @dev A gas-efficient contract for large-scale token airdrops using merkle proofs
- * where each eligible address receives an equal share of the total token balance
+ * @dev Gas-optimized token airdrop using merkle proofs and bitmap claim tracking
  *
- * Key Features:
- * 1. Equal Distribution: Each claimant receives (current balance / remaining claimants)
- * 2. Dynamic Claims: Amount adjusts based on contract balance and unclaimed addresses
- * 3. Gas Efficient: Uses bitmap for tracking claims (~391 bits per 100k users)
- * 4. Merkle Verification: O(log n) claim verification with off-chain proof generation
- * 5. Flexible: Supports adding more tokens or claimants during the airdrop
+ * Core Features:
+ * 1. Dynamic Distribution
+ *    - Equal shares: amount = balance / unclaimed_addresses
+ *    - Adapts to token additions/removals
+ *    - Unclaimed amounts redistribute to remaining users
  *
- * Security Features:
- * - ReentrancyGuard for claim function
- * - SafeERC20 for token transfers
- * - Owner-only admin functions
- * - No user data stored on-chain (only bitmap)
+ * 2. Claim Verification
+ *    - Merkle tree stores [index, address] pairs
+ *    - O(log n) verification with merkle proofs
+ *    - Proofs generated off-chain to save gas
+ *
+ * 3. Storage Optimization
+ *    - Bitmap tracks claimed status
+ *    - Each uint256 word stores 256 claim flags
+ *    - ~3.9kb storage per million users
+ *    - Word index = claimant_index / 256
+ *    - Bit position = claimant_index % 256 
+ *
+ * Example:
+ * - 1000 total claimants, 100 tokens deposited
+ * - Initial claim amount = 100/1000 = 0.1 tokens
+ * - After 500 claims: amount = remaining_tokens/500
+ * - Bit 5 in word 2 tracks claim for index 517
+ *
+ * Security:
+ * - Reentrancy protection on claims
+ * - SafeERC20 for transfers
+ * - Immutable core parameters
+ * - No user data stored on-chain
+ * - Merkle proof verification
  */
 contract Airdrop is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -33,23 +50,25 @@ contract Airdrop is Ownable, ReentrancyGuard {
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Token being airdropped
+    /// @notice Token contract being distributed
     IERC20 public immutable token;
 
-    /// @notice Merkle root of tree containing [index, address] pairs
+    /// @notice Root hash of merkle tree containing [index, address] pairs
     bytes32 public immutable merkleRoot;
 
-    /// @notice Total number of addresses eligible to claim
+    /// @notice Total number of addresses in merkle tree
     uint256 public immutable totalClaimants;
 
-    /// @notice Number of addresses that have claimed so far
+    /// @notice Running count of successful claims
     uint256 public totalClaimed;
 
     /**
-     * @notice Packed array of booleans tracking claimed status
-     * @dev Mapping of word index => word
-     * Each word tracks 256 sequential indices
-     * bit i in word w tracks claim status for index w * 256 + i
+     * @notice Packed array tracking claimed status
+     * @dev Maps word_index => 256-bit word
+     * Each bit in word represents claimed status:
+     * - word_index = claimant_index / 256
+     * - bit_position = claimant_index % 256
+     * - claimed = (word & (1 << bit_position)) != 0
      */
     mapping(uint256 => uint256) private claimedBitMap;
 
@@ -57,17 +76,29 @@ contract Airdrop is Ownable, ReentrancyGuard {
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Emitted when tokens are claimed by an address
+    /**
+     * @notice Logs successful token claim
+     * @param account Recipient address
+     * @param index Position in merkle tree
+     * @param amount Tokens transferred
+     */
     event Claimed(
         address indexed account,
         uint256 indexed index,
         uint256 amount
     );
 
-    /// @notice Emitted when merkle root and total claimants are updated
+    /**
+     * @notice Logs merkle root updates
+     * @param merkleRoot New root hash
+     * @param totalClaimants Updated total claimants
+     */
     event MerkleRootUpdated(bytes32 merkleRoot, uint256 totalClaimants);
 
-    /// @notice Emitted when airdrop ends and remaining tokens are burned
+    /**
+     * @notice Logs airdrop completion
+     * @param burnedAmount Remaining tokens burned
+     */
     event AirdropEnded(uint256 burnedAmount);
 
     /*//////////////////////////////////////////////////////////////
@@ -75,10 +106,11 @@ contract Airdrop is Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Deploy airdrop contract
-     * @param token_ Address of token to airdrop
-     * @param merkleRoot_ Root of merkle tree containing [index, address] pairs
-     * @param totalClaimants_ Total number of addresses in merkle tree
+     * @notice Initializes airdrop parameters
+     * @param token_ ERC20 token address
+     * @param merkleRoot_ Root hash of [index, address] pairs
+     * @param totalClaimants_ Number of eligible addresses
+     * @dev Validates input addresses and claimant count
      */
     constructor(
         address token_,
@@ -97,9 +129,10 @@ contract Airdrop is Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Check if an index has already claimed tokens
+     * @notice Checks if index has claimed
      * @param index Position in merkle tree
-     * @return bool True if tokens already claimed for this index
+     * @return True if tokens claimed
+     * @dev Uses bitmap: word & (1 << bit) != 0
      */
     function isClaimed(uint256 index) public view returns (bool) {
         uint256 wordIndex = index / 256;
@@ -110,9 +143,9 @@ contract Airdrop is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Calculate current claimable amount per address
-     * @dev Amount = current token balance / remaining unclaimed addresses
-     * @return uint256 Amount of tokens claimable per address
+     * @notice Calculates current claim amount
+     * @return Tokens per remaining claimant
+     * @dev amount = balance / unclaimed_addresses
      */
     function getClaimAmount() public view returns (uint256) {
         uint256 remainingClaimants = totalClaimants - totalClaimed;
@@ -125,11 +158,16 @@ contract Airdrop is Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Claim tokens for an address
-     * @param index Position in merkle tree
-     * @param account Address receiving tokens
-     * @param merkleProof Array of hashes proving inclusion in tree
-     * @dev Amount claimed is current balance / remaining claimants
+     * @notice Claims tokens for eligible address
+     * @param index Claimant's merkle tree position
+     * @param account Recipient address
+     * @param merkleProof Proof of inclusion hashes
+     * @dev Claim workflow:
+     * 1. Verify not already claimed
+     * 2. Validate merkle proof
+     * 3. Calculate dynamic amount
+     * 4. Update bitmap
+     * 5. Transfer tokens
      */
     function claim(
         uint256 index,
@@ -139,18 +177,15 @@ contract Airdrop is Ownable, ReentrancyGuard {
         require(!isClaimed(index), "Already claimed");
         require(index < totalClaimants, "Invalid index");
 
-        // Verify merkle proof of [index, account] pair
         bytes32 node = keccak256(abi.encodePacked(index, account));
         require(
             MerkleProof.verify(merkleProof, merkleRoot, node),
             "Invalid proof"
         );
 
-        // Calculate and validate claim amount
         uint256 amount = getClaimAmount();
         require(amount > 0, "Nothing to claim");
 
-        // Update state and transfer tokens
         _setClaimed(index);
         totalClaimed++;
         token.safeTransfer(account, amount);
@@ -163,8 +198,9 @@ contract Airdrop is Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Mark an index as claimed in bitmap
-     * @param index Index to mark as claimed
+     * @notice Sets claimed bit in bitmap
+     * @param index Bit to set
+     * @dev Updates using: word |= (1 << bit)
      */
     function _setClaimed(uint256 index) private {
         uint256 wordIndex = index / 256;
