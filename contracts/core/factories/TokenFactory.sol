@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.22;
+pragma solidity 0.8.22;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
@@ -43,6 +43,13 @@ contract TokenFactory is Initializable, AccessControlUpgradeable {
 
     /// @notice Manager contract that handles token lifecycle
     address public manager;
+
+    /*//////////////////////////////////////////////////////////////
+                            STORAGE GAPS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Gap for future storage layout changes
+    uint256[50] private __gap;
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -188,6 +195,7 @@ contract TokenFactory is Initializable, AccessControlUpgradeable {
      * @param isExempt_ Whether account should be tax exempt
      */
     function setTokenTaxExempt(address token_, address account_, bool isExempt_) external onlyRole(ADMIN_ROLE) {
+        require(account_ != address(0), "Invalid account");
         Token(token_).setTaxExempt(account_, isExempt_);
     }
 
@@ -197,6 +205,7 @@ contract TokenFactory is Initializable, AccessControlUpgradeable {
      * @param treasury_ Address to receive tax fees
      */
     function setTokenPlatformTreasury(address token_, address treasury_) external onlyRole(ADMIN_ROLE) {
+        require(treasury_ != address(0), "Invalid treasury");
         Token(token_).setPlatformTreasury(treasury_);
     }
 
@@ -206,6 +215,7 @@ contract TokenFactory is Initializable, AccessControlUpgradeable {
      * @param buyTax_ New buy tax percentage
      */
     function setTokenBuyTax(address token_, uint256 buyTax_) external onlyRole(ADMIN_ROLE) {
+        require(buyTax_ <= 5_000, "Invalid tax");
         Token(token_).setBuyTax(buyTax_);
     }
 
@@ -215,6 +225,7 @@ contract TokenFactory is Initializable, AccessControlUpgradeable {
      * @param sellTax_ New sell tax percentage
      */
     function setTokenSellTax(address token_, uint256 sellTax_) external onlyRole(ADMIN_ROLE) {
+        require(sellTax_ <= 5_000, "Invalid tax");
         Token(token_).setSellTax(sellTax_);
     }
 }

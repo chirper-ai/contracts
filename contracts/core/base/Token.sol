@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.22;
 
 import "hardhat/console.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
@@ -150,8 +150,8 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
         creator = creator_;
         platformTreasury = platformTreasury_;
 
-        buyTax = 1000;
-        sellTax = 1000;
+        buyTax = 1_000;
+        sellTax = 1_000;
 
         isTaxExempt[address(this)] = true;
         isTaxExempt[msg.sender] = true;
@@ -207,6 +207,7 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
      */
     function setPlatformTreasury(address newTreasury) external onlyOwner {
         require(newTreasury != address(0), "Invalid treasury");
+        require(newTreasury != platformTreasury, "Identical treasury");
         platformTreasury = newTreasury;
     }
 
@@ -216,6 +217,7 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
      */
     function setBuyTax(uint256 newBuyTax) external onlyOwner {
         require(newBuyTax < BASIS_POINTS, "Invalid tax");
+        require(newBuyTax != buyTax, "Identical tax rates");
         buyTax = newBuyTax;
         emit TaxUpdated(buyTax, sellTax);
     }
@@ -226,6 +228,7 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
      */
     function setSellTax(uint256 newSellTax) external onlyOwner {
         require(newSellTax < BASIS_POINTS, "Invalid tax");
+        require(newSellTax != sellTax, "Identical tax rates");
         sellTax = newSellTax;
         emit TaxUpdated(buyTax, sellTax);
     }

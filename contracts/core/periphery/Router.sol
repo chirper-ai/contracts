@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.22;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
@@ -54,6 +54,13 @@ contract Router is
 
     /// @notice Maximum percentage of total supply that can be held by a single address
     uint256 public maxHold;
+
+    /*//////////////////////////////////////////////////////////////
+                            STORAGE GAPS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Gap for future storage layout changes
+    uint256[47] private __gap;
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.22;
 
 import "hardhat/console.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
@@ -137,6 +137,13 @@ contract Manager is
 
     /// @notice Registered token list
     address[] public allAgents;
+
+    /*//////////////////////////////////////////////////////////////
+                            STORAGE GAPS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Gap for future storage layout changes
+    uint256[45] private __gap;
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS

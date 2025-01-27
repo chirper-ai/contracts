@@ -10,7 +10,6 @@ async function main() {
   const INITIAL_SUPPLY = ethers.parseEther("1000000000"); // 1B tokens
   const K_CONSTANT = 250; // K constant for bonding curve
   const MAX_HOLD_PERCENT = 1_000; // 1% maximum hold
-  const GRADUATION_SLIPPAGE = 1_000; // 1% slippage tolerance
   const GRADUATION_THRESHOLD = 20_000; // 20% threshold
 
   // Use VANA token address on moksha testnet
@@ -19,7 +18,6 @@ async function main() {
   console.log("Deploying Factory...");
   const Factory = await ethers.getContractFactory("Factory");
   const factory = await upgrades.deployProxy(Factory, [
-    INITIAL_SUPPLY,
     K_CONSTANT
   ]);
   await factory.waitForDeployment();
@@ -40,11 +38,19 @@ async function main() {
   const manager = await upgrades.deployProxy(Manager, [
     await factory.getAddress(),
     ASSET_TOKEN_ADDRESS,
-    GRADUATION_SLIPPAGE,
     GRADUATION_THRESHOLD
   ]);
   await manager.waitForDeployment();
   console.log("Manager deployed to:", await manager.getAddress());
+
+  // Token Factory
+  console.log("Deploying Token Factory...");
+  const TokenFactory = await ethers.getContractFactory("TokenFactory");
+  const tokenFactory = await upgrades.deployProxy(TokenFactory, [
+    await factory.getAddress(),
+    await manager.getAddress(),
+    INITIAL_SUPPLY, // 1B initial supply
+  ]);
 
   // Set up contract relationships
   console.log("Setting up contract relationships...");
@@ -54,12 +60,16 @@ async function main() {
   
   await factory.setManager(await manager.getAddress());
   console.log("Manager set in Factory");
+  
+  await factory.setTokenFactory(await tokenFactory.getAddress());
+  console.log("TokenFactory set in Factory");
 
   console.log("Deployment completed!");
   console.log({
     factory: await factory.getAddress(),
     router: await router.getAddress(),
     manager: await manager.getAddress(),
+    tokenFactory: await tokenFactory.getAddress(),
   });
 
   // Verify contracts on VANAScan

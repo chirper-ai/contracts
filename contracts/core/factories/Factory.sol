@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.22;
+pragma solidity 0.8.22;
 
 import "hardhat/console.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -106,6 +106,13 @@ contract Factory is
 
     /// @notice Bonding curve steepness parameter
     uint256 public K;
+
+    /*//////////////////////////////////////////////////////////////
+                            STORAGE GAPS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Gap for future storage layout changes
+    uint256[44] private __gap;
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -355,6 +362,7 @@ contract Factory is
      */
     function setK(uint256 newK) external onlyRole(ADMIN_ROLE) {
         require(newK > 0, "Invalid K");
+        require(newK != K, "Identical K");
         K = newK;
     }
 
@@ -363,6 +371,8 @@ contract Factory is
      * @param newPlatformTreasury New treasury address 
      */
     function setPlatformTreasury(address newPlatformTreasury) external onlyRole(ADMIN_ROLE) {
+        require(newPlatformTreasury != address(0), "Invalid treasury");
+        require(newPlatformTreasury != platformTreasury, "Identical treasury");
         platformTreasury = newPlatformTreasury;
     }
 
@@ -371,6 +381,8 @@ contract Factory is
      * @param manager_ New manager contract address
      */
     function setManager(address manager_) external onlyRole(ADMIN_ROLE) {
+        require(manager_ != address(0), "Invalid manager");
+        require(manager_ != address(manager), "Identical manager");
         manager = IManager(manager_);
     }
 
@@ -379,6 +391,8 @@ contract Factory is
      * @param router_ New router contract address
      */
     function setRouter(address router_) external onlyRole(ADMIN_ROLE) {
+        require(router_ != address(0), "Invalid router");
+        require(router_ != address(router), "Identical router");
         router = IRouter(router_);
     }
 
@@ -387,6 +401,8 @@ contract Factory is
      * @param tokenFactory_ New factory contract address
      */
     function setTokenFactory(address tokenFactory_) external onlyRole(ADMIN_ROLE) {
+        require(tokenFactory_ != address(0), "Invalid factory");
+        require(tokenFactory_ != address(tokenFactory), "Identical factory");
         tokenFactory = ITokenFactory(tokenFactory_);
     }
 }
