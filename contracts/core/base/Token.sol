@@ -61,16 +61,16 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
     string public intention;
 
     /// @notice Tax rate for buy operations in basis points (1000 = 1%)
-    uint256 public immutable buyTax;
+    uint256 public buyTax;
 
     /// @notice Tax rate for sell operations in basis points (1000 = 1%)
-    uint256 public immutable sellTax;
+    uint256 public sellTax;
 
     /// @notice Address receiving 50% of collected taxes
     address public creator;
 
     /// @notice Address receiving remaining 50% of taxes
-    address public immutable platformTreasury;
+    address public platformTreasury;
 
     /// @notice Contract controlling graduation process
     address public immutable manager;
@@ -114,13 +114,6 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
      * @param isExempt New exemption status
      */
     event TaxExemptUpdated(address indexed account, bool isExempt);
-
-    /**
-     * @notice Tracks transaction limit exemption changes
-     * @param account Modified address
-     * @param isExempt New exemption status
-     */
-    event TxLimitExemptUpdated(address indexed account, bool isExempt);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -207,6 +200,36 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
         emit TaxExemptUpdated(account, isExempt);
     }
 
+    /**
+     * @notice sets new platform treasury address
+     * @param newTreasury New treasury address
+     * @dev Restricted to contract owner
+     */
+    function setPlatformTreasury(address newTreasury) external onlyOwner {
+        require(newTreasury != address(0), "Invalid treasury");
+        platformTreasury = newTreasury;
+    }
+
+    /**
+     * @notice Updates buy tax rate
+     * @param newBuyTax New buy tax rate
+     */
+    function setBuyTax(uint256 newBuyTax) external onlyOwner {
+        require(newBuyTax < BASIS_POINTS, "Invalid tax");
+        buyTax = newBuyTax;
+        emit TaxUpdated(buyTax, sellTax);
+    }
+
+    /**
+     * @notice Updates sell tax rate
+     * @param newSellTax New sell tax rate
+     */
+    function setSellTax(uint256 newSellTax) external onlyOwner {
+        require(newSellTax < BASIS_POINTS, "Invalid tax");
+        sellTax = newSellTax;
+        emit TaxUpdated(buyTax, sellTax);
+    }
+
     /*//////////////////////////////////////////////////////////////
                          INTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -228,6 +251,9 @@ contract Token is ERC20, ERC20Permit, Ownable, ReentrancyGuard {
         uint256 amount
     ) private view returns (uint256) {
         if (isTaxExempt[from] || isTaxExempt[to]) {
+            return 0;
+        }
+        if (buyTax == 0 && sellTax == 0) {
             return 0;
         }
 
