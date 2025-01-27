@@ -8,7 +8,7 @@ import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import "../base/Pair.sol";
-import "../distribution/Airdrop.sol";
+import "../base/Airdrop.sol";
 import "../../interfaces/IToken.sol";
 import "../../interfaces/IRouter.sol";
 import "../../interfaces/IManager.sol";
