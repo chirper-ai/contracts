@@ -108,7 +108,7 @@ contract Router is
 
         require(factory_ != address(0), "Invalid factory");
         require(assetToken_ != address(0), "Invalid asset token");
-        //require(IERC20(assetToken_).decimals() == 18, "Asset token must have 18 decimals");
+        require(IToken(assetToken_).decimals() == 18, "Asset token must have 18 decimals");
 
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -321,6 +321,12 @@ contract Router is
         require(msg.sender == factory.manager(), "Only manager");
         address pair = factory.getPair(token, assetToken);
         require(pair != address(0), "Pair not found");
+
+        // should graduate
+        (bool shouldGraduate,) = IManager(factory.manager()).checkGraduation(token);
+
+        // check should graduate
+        require(shouldGraduate, "Token not ready for graduation");
 
         // bonding pair
         IPair bondingPair = IPair(pair);

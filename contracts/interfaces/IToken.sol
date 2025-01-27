@@ -13,6 +13,7 @@ interface IToken is IERC20, IERC20Permit {
 
     // View Functions
     function url() external view returns (string memory);
+    function decimals() external view returns (uint8);
     function intention() external view returns (string memory);
     function buyTax() external view returns (uint256);
     function sellTax() external view returns (uint256);
