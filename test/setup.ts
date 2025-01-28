@@ -189,11 +189,11 @@ export async function deployFixture(): Promise<TestContext> {
   const assetToken = await MockERC20.deploy(
     "VANA Token",
     "VANA",
-    ethers.parseEther("10000000000") // 10B supply with 18 decimals
+    ethers.parseEther(`${10_000_000_000}`) // 10B supply with 18 decimals
   );
 
   // Fund test accounts with 100M VANA each
-  const testBalance = ethers.parseEther("100000000"); // Changed to use parseEther for 18 decimals
+  const testBalance = ethers.parseEther(`${100_000_000}`); // Changed to use parseEther for 18 decimals
   await assetToken.transfer(await alice.getAddress(), testBalance);
   await assetToken.transfer(await bob.getAddress(), testBalance);
 
@@ -201,7 +201,8 @@ export async function deployFixture(): Promise<TestContext> {
   // Factory First
   const Factory = await ethers.getContractFactory("Factory");
   const factory = await upgrades.deployProxy(Factory, [
-    250, // K constant
+    ethers.parseEther(`${5_000}`), // initial reserve agent
+    5, // impact multiplier
   ]);
 
   // Then Router
@@ -217,7 +218,7 @@ export async function deployFixture(): Promise<TestContext> {
   const manager = await upgrades.deployProxy(Manager, [
     await factory.getAddress(),
     await assetToken.getAddress(),
-    20_000 // graduation threshold
+    50_000 // 50% graduation threshold
   ]);
 
   // Token Factory
@@ -225,7 +226,7 @@ export async function deployFixture(): Promise<TestContext> {
   const tokenFactory = await upgrades.deployProxy(TokenFactory, [
     await factory.getAddress(),
     await manager.getAddress(),
-    ethers.parseEther("1000000000"), // 1B initial supply
+    ethers.parseEther(`${1_000_000_000}`), // 1B initial supply
   ]);
 
 

@@ -16,7 +16,7 @@ describe("Manager", function () {
 
       expect(await manager.factory()).to.equal(await factory.getAddress());
       expect(await manager.assetToken()).to.equal(await assetToken.getAddress());
-      expect(await manager.gradThreshold()).to.equal(20_000n); // 20%
+      expect(await manager.gradThreshold()).to.equal(50_000n); // 50%
     });
 
     it("should grant ADMIN_ROLE to deployer", async function () {
@@ -76,7 +76,7 @@ describe("Manager", function () {
 
       // Initially shouldn't graduate due to high reserve ratio
       expect(shouldGraduate).to.be.false;
-      expect(ratio).to.be.gt(20_000n); // > 20%
+      expect(ratio).to.be.gt(50_000n); // > 20%
     });
   });
 
@@ -96,7 +96,7 @@ describe("Manager", function () {
       await router.connect(owner).setMaxHold(100_000);
       
       // Buy tokens to reduce reserve ratio
-      const buyAmount = ethers.parseEther("1000");
+      const buyAmount = ethers.parseEther(`${1_000_000}`);
       await assetToken.connect(alice).approve(
         await router.getAddress(),
         buyAmount
@@ -145,7 +145,7 @@ describe("Manager", function () {
       await router.connect(owner).setMaxHold(100_000);
       
       // Buy tokens to reduce reserve ratio
-      const buyAmount = ethers.parseEther("1000");
+      const buyAmount = ethers.parseEther(`${1_000_000}`);
       await assetToken.connect(alice).approve(
         await router.getAddress(),
         buyAmount

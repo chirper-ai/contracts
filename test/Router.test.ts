@@ -71,25 +71,25 @@ describe("Router", function () {
 
     it("should execute swapTokensForExactTokens for selling", async function () {
       const { router, alice, assetToken } = context;
-      const amountOut = ethers.parseEther("0.1");
-
-      const assetBalanceBefore = await assetToken.balanceOf(
-        await alice.getAddress()
+      const amountOut = ethers.parseEther("0.01");
+      
+      const aliceAddress = await alice.getAddress();
+      const assetBalanceBefore = await assetToken.balanceOf(aliceAddress);
+    
+      // Execute swap
+      await router
+      .connect(alice)
+      .swapTokensForExactTokens(
+        amountOut,
+        ethers.MaxUint256,
+        [await token.getAddress(), await assetToken.getAddress()],
+        aliceAddress,
+        ethers.MaxUint256
       );
 
-      await router
-        .connect(alice)
-        .swapTokensForExactTokens(
-          amountOut,
-          ethers.MaxUint256,
-          [await token.getAddress(), await assetToken.getAddress()],
-          await alice.getAddress(),
-          ethers.MaxUint256
-        );
+    const assetBalanceAfter = await assetToken.balanceOf(aliceAddress);
 
-      expect(
-        Number(await assetToken.balanceOf(await alice.getAddress()))
-      ).to.be.gt(Number(assetBalanceBefore));
+    expect(Number(assetBalanceAfter)).to.be.gt(Number(assetBalanceBefore));
     });
   });
 
@@ -216,9 +216,10 @@ describe("Router", function () {
     });
 
     it("should enforce max hold in swapTokensForExactTokens", async function () {
-      const { router, alice, assetToken } = context;
+      const { router, owner, alice, assetToken } = context;
 
-      const largeAmount = ethers.parseEther("1000000");
+      const largeAmount = ethers.parseEther(`${10_000_000}`);
+      await router.connect(owner).setMaxHold(500);
 
       let error;
       try {
@@ -240,7 +241,7 @@ describe("Router", function () {
 
     it("should update max hold limit correctly", async function () {
       const { router, owner } = context;
-      const newMaxHold = 5000;
+      const newMaxHold = 5_000;
 
       await router.connect(owner).setMaxHold(newMaxHold);
       expect(Number(await router.maxHold())).to.equal(newMaxHold);

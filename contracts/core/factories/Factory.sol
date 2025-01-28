@@ -89,6 +89,9 @@ contract Factory is
     /// @notice Maps tokens to their airdrop contracts
     mapping(address => address) public tokenToAirdrop;
 
+    /// @notice impactMultiplier for price calculation
+    uint256 public impactMultiplier;
+
     /// @notice List of all created pair addresses
     address[] public allPairs;
 
@@ -105,7 +108,7 @@ contract Factory is
     address public platformTreasury;
 
     /// @notice Bonding curve steepness parameter
-    uint256 public K;
+    uint256 public initialReserveAsset;
 
     /*//////////////////////////////////////////////////////////////
                             STORAGE GAPS
@@ -151,18 +154,24 @@ contract Factory is
 
     /**
      * @notice Sets initial contract configuration
-     * @param k_ Bonding curve constant (e.g., 1e18)
+     * @param initialReserveAsset_ Initial reserve asset amount
+     * @param impactMultiplier_ Impact multiplier for price calculation
      */
-    function initialize(uint256 k_) external initializer {
+    function initialize(
+        uint256 initialReserveAsset_,
+        uint256 impactMultiplier_
+    ) external initializer {
         __AccessControl_init();
         __ReentrancyGuard_init();
         
-        require(k_ > 0, "Invalid K");
+        require(impactMultiplier_ > 0, "Invalid Impact Multiplier");
+        require(initialReserveAsset_ > 0, "Invalid Initial Reserve");
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(ADMIN_ROLE, msg.sender);
 
-        K = k_;
+        impactMultiplier = impactMultiplier_;
+        initialReserveAsset = initialReserveAsset_;
         platformTreasury = msg.sender;
     }
 
@@ -253,7 +262,8 @@ contract Factory is
             address(router),
             address(agentToken),
             address(assetToken),
-            K
+            initialReserveAsset,
+            impactMultiplier
         );
         pair = address(newPair);
 
@@ -357,13 +367,23 @@ contract Factory is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Updates bonding curve constant
-     * @param newK New K value for price calculation
+     * @notice Updates bonding curve parameter
+     * @param impactMultiplier_ New impactMultiplier value for price calculation
      */
-    function setK(uint256 newK) external onlyRole(ADMIN_ROLE) {
-        require(newK > 0, "Invalid K");
-        require(newK != K, "Identical K");
-        K = newK;
+    function setImpactMultiplier(uint256 impactMultiplier_) external onlyRole(ADMIN_ROLE) {
+        require(impactMultiplier_ > 0, "Invalid Impact Multiplier");
+        require(impactMultiplier_ != impactMultiplier, "Impact Multiplier");
+        impactMultiplier = impactMultiplier_;
+    }
+
+    /**
+     * @notice Updates initial reserve asset
+     * @param initialReserveAsset_ New K value for price calculation
+     */
+    function setInitialReserveAsset(uint256 initialReserveAsset_) external onlyRole(ADMIN_ROLE) {
+        require(initialReserveAsset_ > 0, "Invalid asset reserve");
+        require(initialReserveAsset_ != initialReserveAsset, "Identical asset reserve");
+        initialReserveAsset = initialReserveAsset_;
     }
 
     /**

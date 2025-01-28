@@ -29,7 +29,8 @@ describe("Pair", function () {
       expect(await pair.router()).to.equal(await router.getAddress());
       expect(await pair.agentToken()).to.equal(await token.getAddress());
       expect(await pair.assetToken()).to.equal(await assetToken.getAddress());
-      expect(await pair.K()).to.equal(await factory.K());
+      expect(await pair.initialReserveAsset()).to.equal(await factory.initialReserveAsset());
+      expect(await pair.impactMultiplier()).to.equal(await factory.impactMultiplier());
       expect(await token.hasGraduated()).to.be.false;
     });
 
@@ -52,25 +53,96 @@ describe("Pair", function () {
         .approve(await router.getAddress(), ethers.MaxUint256);
     });
 
+    describe("Price Impact", function () {
+      it("should demonstrate increasing price impact with larger trades", async function () {
+        const smallTrade = ethers.parseEther("0.1");
+        const largeTrade = ethers.parseEther("10");
+
+        const smallTradeOutput = await pair.getAgentAmountOut(smallTrade);
+        const largeTradeOutput = await pair.getAgentAmountOut(largeTrade);
+
+        // Calculate effective rates
+        const smallTradeRate = Number(smallTrade) / Number(smallTradeOutput);
+        const largeTradeRate = Number(largeTrade) / Number(largeTradeOutput);
+
+        // Large trade should have worse rate due to price impact
+        expect(largeTradeRate).to.be.gt(smallTradeRate);
+      });
+
+      it("should have symmetric price impact for buys and sells accounting for tax", async function () {
+        const { router, alice, assetToken } = context;
+        const assetAmountIn = ethers.parseEther("10");
+
+        // Track initial balances
+        const initialAssetBalance = await assetToken.balanceOf(await alice.getAddress());
+        const initialAgentBalance = await token.balanceOf(await alice.getAddress());
+
+        // Buy tokens
+        await router
+          .connect(alice)
+          .swapExactTokensForTokens(
+            assetAmountIn,
+            0,
+            [await assetToken.getAddress(), await token.getAddress()],
+            await alice.getAddress(),
+            ethers.MaxUint256
+          );
+
+        const midAgentBalance = await token.balanceOf(await alice.getAddress());
+        const midAssetBalance = await assetToken.balanceOf(await alice.getAddress());
+        const agentReceived = BigInt(midAgentBalance) - BigInt(initialAgentBalance);
+
+        // Sell tokens back
+        await token
+          .connect(alice)
+          .approve(await router.getAddress(), agentReceived);
+        
+        await router
+          .connect(alice)
+          .swapExactTokensForTokens(
+            agentReceived,
+            0,
+            [await token.getAddress(), await assetToken.getAddress()],
+            await alice.getAddress(),
+            ethers.MaxUint256
+          );
+
+        // final balance
+        const finalAssetBalance = await assetToken.balanceOf(await alice.getAddress());
+
+        // spent = initial - mid
+        const assetSpent = BigInt(initialAssetBalance) - BigInt(midAssetBalance);  // Should be 10.0
+        const assetReturned = BigInt(finalAssetBalance) - BigInt(midAssetBalance); // Should be ~9.8
+
+        // difference in % between spent and returned
+        const percentageDiff = Number(
+          (assetSpent - assetReturned) *
+          10000n / assetSpent
+        ) / 100;
+        
+        // Allow for up to 2% difference from expected after-tax amount due to price impact
+        expect(percentageDiff).to.be.lt(2);
+      });
+    });
+
     describe("Buying Agent Tokens", function () {
       it("should calculate correct output amount for asset input", async function () {
         const assetAmountIn = ethers.parseEther("1");
+        const [reserveAgent] = await pair.getReserves();
         const expectedAgentOut = await pair.getAgentAmountOut(assetAmountIn);
+
+        // Output should follow formula: agentOut = (assetIn * reserveAgent) / ((reserveAsset + initialReserveAsset) * impactMultiplier + assetIn)
         expect(Number(expectedAgentOut)).to.be.gt(0);
+        expect(Number(expectedAgentOut)).to.be.lt(Number(reserveAgent)); // Can't get more than reserves
       });
 
       it("should execute buy trades correctly", async function () {
         const { router, bob, assetToken } = context;
         const assetAmountIn = ethers.parseEther("0.1");
 
-        const initialAgentBalance = await token.balanceOf(
-          await bob.getAddress()
-        );
-        const initialAssetBalance = await assetToken.balanceOf(
-          await bob.getAddress()
-        );
+        const initialAgentBalance = await token.balanceOf(await bob.getAddress());
+        const initialAssetBalance = await assetToken.balanceOf(await bob.getAddress());
 
-        // approve
         await assetToken
           .connect(bob)
           .approve(await router.getAddress(), assetAmountIn);
@@ -85,12 +157,8 @@ describe("Pair", function () {
             ethers.MaxUint256
           );
 
-        const finalAgentBalance = await token.balanceOf(
-          await bob.getAddress()
-        );
-        const finalAssetBalance = await assetToken.balanceOf(
-          await bob.getAddress()
-        );
+        const finalAgentBalance = await token.balanceOf(await bob.getAddress());
+        const finalAssetBalance = await assetToken.balanceOf(await bob.getAddress());
 
         expect(Number(finalAgentBalance)).to.be.gt(Number(initialAgentBalance));
         expect(Number(finalAssetBalance)).to.be.lt(Number(initialAssetBalance));
@@ -100,10 +168,8 @@ describe("Pair", function () {
         const { router, bob, assetToken } = context;
         const assetAmountIn = ethers.parseEther("0.1");
 
-        const [initialReserveAgent, initialReserveAsset] =
-          await pair.getReserves();
+        const [initialReserveAgent, initialReserveAsset] = await pair.getReserves();
 
-        // approve
         await assetToken
           .connect(bob)
           .approve(await router.getAddress(), assetAmountIn);
@@ -129,21 +195,20 @@ describe("Pair", function () {
       it("should calculate correct output amount for agent input", async function () {
         const agentAmountIn = ethers.parseEther("0.1");
         const expectedAssetOut = await pair.getAssetAmountOut(agentAmountIn);
+        const [, reserveAsset] = await pair.getReserves();
+
+        // Output should follow formula: assetOut = agentIn * (reserveAsset + initialReserveAsset) / (reserveAgent * impactMultiplier + agentIn)
         expect(Number(expectedAssetOut)).to.be.gt(0);
+        expect(Number(expectedAssetOut)).to.be.lt(Number(reserveAsset)); // Can't get more than reserves
       });
 
       it("should execute sell trades correctly", async function () {
         const { router, alice, assetToken } = context;
         const agentAmountIn = ethers.parseEther("0.1");
 
-        const initialAgentBalance = await token.balanceOf(
-          await alice.getAddress()
-        );
-        const initialAssetBalance = await assetToken.balanceOf(
-          await alice.getAddress()
-        );
+        const initialAgentBalance = await token.balanceOf(await alice.getAddress());
+        const initialAssetBalance = await assetToken.balanceOf(await alice.getAddress());
 
-        // approve
         await token
           .connect(alice)
           .approve(await router.getAddress(), agentAmountIn);
@@ -158,12 +223,8 @@ describe("Pair", function () {
             ethers.MaxUint256
           );
 
-        const finalAgentBalance = await token.balanceOf(
-          await alice.getAddress()
-        );
-        const finalAssetBalance = await assetToken.balanceOf(
-          await alice.getAddress()
-        );
+        const finalAgentBalance = await token.balanceOf(await alice.getAddress());
+        const finalAssetBalance = await assetToken.balanceOf(await alice.getAddress());
 
         expect(Number(finalAgentBalance)).to.be.lt(Number(initialAgentBalance));
         expect(Number(finalAssetBalance)).to.be.gt(Number(initialAssetBalance));
@@ -173,8 +234,7 @@ describe("Pair", function () {
         const { router, alice, assetToken } = context;
         const agentAmountIn = ethers.parseEther("0.1");
 
-        const [initialReserveAgent, initialReserveAsset] =
-          await pair.getReserves();
+        const [initialReserveAgent, initialReserveAsset] = await pair.getReserves();
 
         await router
           .connect(alice)
@@ -196,24 +256,18 @@ describe("Pair", function () {
     describe("Graduation", function () {
       it("should trigger graduation at correct threshold", async function () {
         const { router, alice, owner, assetToken } = context;
-
-        // Use getAssetAmountIn to calculate required asset tokens (if such a function exists)
-        // For now, we'll estimate with a larger amount to ensure we hit threshold
         const assetAmountIn = ethers.parseEther("1000000"); // Large enough to trigger graduation
 
-        // owner set max holding to 100_000
-        router.connect(owner).setMaxHold(100_000);
+        await router.connect(owner).setMaxHold(100_000);
 
-        // Approve asset tokens for spending
         await assetToken
           .connect(alice)
           .approve(await router.getAddress(), assetAmountIn);
 
-        // Swap asset tokens for agent tokens
         await router.connect(alice).swapExactTokensForTokens(
           assetAmountIn,
-          0, // Accept any amount of agent tokens out
-          [await assetToken.getAddress(), await token.getAddress()], // Path: asset -> agent
+          0,
+          [await assetToken.getAddress(), await token.getAddress()],
           await alice.getAddress(),
           ethers.MaxUint256
         );
@@ -223,34 +277,28 @@ describe("Pair", function () {
 
       it("should not allow trading after graduation", async function () {
         const { router, alice, owner, assetToken } = context;
+        const assetAmountIn = ethers.parseEther("1000000");
 
-        // Use getAssetAmountIn to calculate required asset tokens (if such a function exists)
-        // For now, we'll estimate with a larger amount to ensure we hit threshold
-        const assetAmountIn = ethers.parseEther("1000000"); // Large enough to trigger graduation
+        await router.connect(owner).setMaxHold(100_000);
 
-        // owner set max holding to 100_000
-        router.connect(owner).setMaxHold(100_000);
-
-        // Approve asset tokens for spending
         await assetToken
           .connect(alice)
           .approve(await router.getAddress(), assetAmountIn);
+
         await router.connect(alice).swapExactTokensForTokens(
           assetAmountIn,
           0,
-          [await assetToken.getAddress(), await token.getAddress()], // Path: asset -> agent
+          [await assetToken.getAddress(), await token.getAddress()],
           await alice.getAddress(),
           ethers.MaxUint256
         );
 
-        // Approve asset tokens for spending
         await assetToken
           .connect(alice)
           .approve(await router.getAddress(), ethers.parseEther("1"));
 
-        let error;
-        try {
-          await router
+        await expect(
+          router
             .connect(alice)
             .swapExactTokensForTokens(
               ethers.parseEther("1"),
@@ -258,12 +306,8 @@ describe("Pair", function () {
               [await assetToken.getAddress(), await token.getAddress()],
               await alice.getAddress(),
               ethers.MaxUint256
-            );
-        } catch (e) {
-          error = e;
-        }
-
-        expect(error?.message).to.include("Already graduated");
+            )
+        ).to.be.revertedWith("Already graduated");
       });
     });
   });
@@ -271,15 +315,9 @@ describe("Pair", function () {
   describe("Security", function () {
     it("should only allow router to call swap", async function () {
       const { alice } = context;
-
-      let error;
-      try {
-        await pair.connect(alice).swap(ethers.parseEther("1"), 0, 0, 0);
-      } catch (e) {
-        error = e;
-      }
-
-      expect(error?.message).to.include("Only router");
+      await expect(
+        pair.connect(alice).swap(ethers.parseEther("1"), 0, 0, 0)
+      ).to.be.revertedWith("Only router");
     });
   });
 });

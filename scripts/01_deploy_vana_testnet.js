@@ -7,18 +7,21 @@ async function main() {
   console.log("Account balance:", (await deployer.provider.getBalance(deployer.address)).toString());
 
   // Initial parameters
-  const INITIAL_SUPPLY = ethers.parseEther("1000000000"); // 1B tokens
-  const K_CONSTANT = 250; // K constant for bonding curve
+  const INITIAL_RESERVE = ethers.parseEther(`${5_000}`); // 5K reserve
+  const INITIAL_SUPPLY = ethers.parseEther(`${1_000_000_000}`); // 1B tokens
+  const IMPACT_MULTIPLIER = 5; // 5x impact multiplier
   const MAX_HOLD_PERCENT = 1_000; // 1% maximum hold
-  const GRADUATION_THRESHOLD = 20_000; // 20% threshold
+  const GRADUATION_THRESHOLD = 50_000; // 20% threshold
 
   // Use VANA token address on moksha testnet
   const ASSET_TOKEN_ADDRESS = '0xbccc4b4c6530F82FE309c5E845E50b5E9C89f2AD'; // VANA Address
+  const UNISWAP_V3_ADDRESS = '0x48Bd633f4B9128a38Ebb4a48b6975EB3Eaf1931b'; // Uniswap V3 Address
 
   console.log("Deploying Factory...");
   const Factory = await ethers.getContractFactory("Factory");
   const factory = await upgrades.deployProxy(Factory, [
-    K_CONSTANT
+    INITIAL_RESERVE, // initial reserve agent
+    IMPACT_MULTIPLIER, // impact multiplier
   ]);
   await factory.waitForDeployment();
   console.log("Factory deployed to:", await factory.getAddress());
