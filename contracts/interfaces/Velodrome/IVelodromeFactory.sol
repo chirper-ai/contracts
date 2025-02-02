@@ -3,6 +3,6 @@ pragma solidity 0.8.22;
 
 // IVelodromeFactory is the interface for VelodromeFactory contract
 interface IVelodromeFactory {
-    function createPair(address tokenA, address tokenB, bool stable) external returns (address pair);
-    function getPair(address tokenA, address tokenB, bool stable) external view returns (address);
+    function createPool(address tokenA, address tokenB, uint24 fee) external returns (address pool);
+    function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address);
 }

@@ -15,6 +15,12 @@ interface INonfungiblePositionManager {
         address recipient;
         uint256 deadline;
     }
+    struct CollectParams {
+        uint256 tokenId;
+        address recipient;
+        uint128 amount0Max;
+        uint128 amount1Max;
+    }
     function mint(MintParams calldata params)
         external
         payable
@@ -24,5 +30,6 @@ interface INonfungiblePositionManager {
             uint256 amount0,
             uint256 amount1
         );
+    function collect(CollectParams calldata params) external payable returns (uint256 amount0, uint256 amount1);
     function factory() external view returns (address);
 }

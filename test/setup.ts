@@ -87,6 +87,7 @@ export async function createToken(
       fee: 3000,
       weight: 100_000, // 100%
       dexType: DexType.UniswapV2,
+      slippage: 10_000, // 10%
     },
   ];
 
@@ -211,6 +212,8 @@ export async function deployFixture(): Promise<TestContext> {
     await factory.getAddress(),
     await assetToken.getAddress(),
     1_000, // maximum hold percentage
+    1_000, // 1% buy tax
+    1_000, // 1% sell tax
   ]);
 
   // Then Manager
@@ -218,7 +221,7 @@ export async function deployFixture(): Promise<TestContext> {
   const manager = await upgrades.deployProxy(Manager, [
     await factory.getAddress(),
     await assetToken.getAddress(),
-    50_000 // 50% graduation threshold
+    ethers.parseEther("1000000"), // 1m asset required to graduate
   ]);
 
   // Token Factory

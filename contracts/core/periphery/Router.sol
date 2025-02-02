@@ -55,6 +55,12 @@ contract Router is
     /// @notice Maximum percentage of total supply that can be held by a single address
     uint256 public maxHold;
 
+    /// @notice buy tax
+    uint256 public buyTax;
+
+    /// @notice sell tax
+    uint256 public sellTax;
+
     /*//////////////////////////////////////////////////////////////
                             STORAGE GAPS
     //////////////////////////////////////////////////////////////*/
@@ -84,6 +90,14 @@ contract Router is
         uint256 liquidity
     );
 
+    // @notice Emitted when tax is collected
+    event TaxCollected(
+        address indexed token,
+        uint256 amount,
+        uint256 platformShare,
+        uint256 creatorShare
+    );
+
     /// @notice Emitted when max hold percentage is updated
     event MaxHoldUpdated(uint256 maxHold);
 
@@ -108,7 +122,9 @@ contract Router is
     function initialize(
         address factory_,
         address assetToken_,
-        uint256 maxHold_
+        uint256 maxHold_,
+        uint256 buyTax_,
+        uint256 sellTax_
     ) external initializer {
         __AccessControl_init();
         __ReentrancyGuard_init();
@@ -124,6 +140,8 @@ contract Router is
         factory = IFactory(factory_);
         assetToken = assetToken_;
         maxHold = maxHold_;
+        buyTax = buyTax_;
+        sellTax = sellTax_;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -232,12 +250,15 @@ contract Router is
         amounts = new uint256[](2);
         amounts[0] = amountIn;
 
+        uint256 preTaxAmount;
         if (_isAgentToken(path[0])) {
             // Selling agent token
-            amounts[1] = _getAssetOut(path[0], amountIn);
+            preTaxAmount = _getAssetOut(path[0], amountIn);
+            (amounts[1],) = _applyTax(preTaxAmount, sellTax);
         } else if (_isAgentToken(path[1])) {
             // Buying agent token
-            amounts[1] = _getAgentOut(path[1], amountIn);
+            preTaxAmount = _getAgentOut(path[1], amountIn);
+            (amounts[1],) = _applyTax(preTaxAmount, buyTax);
         } else {
             revert("Invalid path");
         }
@@ -258,11 +279,13 @@ contract Router is
         amounts[1] = amountOut;
 
         if (_isAgentToken(path[0])) {
-            // Selling agent token
-            amounts[0] = _getAgentIn(path[0], amountOut);
+            // Selling agent token - adjust for sell tax
+            uint256 grossAmount = (amountOut * BASIS_POINTS) / (BASIS_POINTS - sellTax);
+            amounts[0] = _getAgentIn(path[0], grossAmount);
         } else if (_isAgentToken(path[1])) {
-            // Buying agent token
-            amounts[0] = _getAssetIn(path[1], amountOut);
+            // Buying agent token - adjust for buy tax
+            uint256 grossAmount = (amountOut * BASIS_POINTS) / (BASIS_POINTS - buyTax);
+            amounts[0] = _getAssetIn(path[1], grossAmount);
         } else {
             revert("Invalid path");
         }
@@ -325,12 +348,13 @@ contract Router is
         uint256 tokenAmount,
         uint256 assetAmount
     ) external nonReentrant {
-        require(msg.sender == factory.manager(), "Only manager");
+        address manager = factory.manager();
+        require(msg.sender == manager, "Only manager");
         address pair = factory.getPair(token, assetToken);
         require(pair != address(0), "Pair not found");
 
         // should graduate
-        (bool shouldGraduate,) = IManager(factory.manager()).checkGraduation(token);
+        bool shouldGraduate = IManager(manager).checkGraduation(token);
 
         // check should graduate
         require(shouldGraduate, "Token not ready for graduation");
@@ -394,6 +418,62 @@ contract Router is
     }
 
     /**
+     * @notice Applies tax to an amount
+     * @param amount Amount to apply tax to
+     * @param taxRate Tax rate in basis points
+     * @return netAmount Amount after tax
+     * @return taxAmount Tax amount
+     */
+    function _applyTax(
+        uint256 amount,
+        uint256 taxRate
+    ) internal pure returns (uint256 netAmount, uint256 taxAmount) {
+        taxAmount = (amount * taxRate) / BASIS_POINTS;
+        netAmount = amount - taxAmount;
+        return (netAmount, taxAmount);
+    }
+
+    /**
+     * @notice Sends tax to platform and creator
+     * @param agentToken Agent token to tax
+     * @param tokenAmount Amount of agent tokens to tax
+     */
+    function _sendTax(
+        address agentToken,
+        IPair pair,
+        bool isAsset,
+        uint256 tokenAmount
+    ) internal {
+        // Ensure exact 50-50 split by doing multiplication before division
+        uint256 platformToken = (tokenAmount * 50) / 100;
+        uint256 creatorToken = (tokenAmount * 50) / 100;
+        
+        // Handle any dust (1 wei) from rounding
+        uint256 dust = tokenAmount - (platformToken + creatorToken);
+        if (dust > 0) {
+            platformToken += dust;
+        }
+
+        // get platform tax address
+        address creatorTreasury = IToken(agentToken).creator();
+        address platformTreasury = factory.platformTreasury();
+
+        // transfer
+        if (isAsset) {
+            // bonding pair transfer
+            pair.transferAsset(platformTreasury, platformToken);
+            pair.transferAsset(creatorTreasury, creatorToken);
+        } else {
+            // bonding pair transfer
+            pair.transferTo(platformTreasury, platformToken);
+            pair.transferTo(creatorTreasury, creatorToken);
+        }
+
+        // emit tax collected
+        emit TaxCollected(agentToken, tokenAmount, platformToken, creatorToken);
+    }
+
+    /**
      * @notice Swaps exact agent tokens for asset tokens
      * @param agentToken Agent token to sell
      * @param amountIn Amount of agent tokens to sell
@@ -414,28 +494,38 @@ contract Router is
         // bonding pair
         IPair bondingPair = IPair(pair);
 
-        // quote
-        uint256 quote = bondingPair.getAssetAmountOut(amountIn);
-        require(quote >= amountOutMin, "Insufficient output");
+        // Get gross amount out
+        uint256 grossAmountOut = bondingPair.getAssetAmountOut(amountIn);
+        
+        // Calculate net amount after tax
+        (uint256 netAmountOut, uint256 taxAmount) = _applyTax(grossAmountOut, sellTax);
+        require(netAmountOut >= amountOutMin, "Insufficient output");
         
         // Transfer tokens to pair
         IERC20(agentToken).safeTransferFrom(msg.sender, pair, amountIn);
         
         // Execute swap
-        bondingPair.swap(amountIn, 0, 0, quote);
-        bondingPair.transferAsset(to, quote);
+        bondingPair.swap(amountIn, 0, 0, grossAmountOut);
+        
+        // Transfer net amount to recipient
+        bondingPair.transferAsset(to, netAmountOut);
+        
+        // Handle tax if applicable
+        if(taxAmount > 0) {
+            _sendTax(agentToken, bondingPair, true, taxAmount);
+        }
 
         // check graduation
         _checkGraduation(agentToken);
 
-        // emit swap
-        emit Swap(msg.sender, agentToken, amountIn, quote, false);
+        // emit swap using net amount
+        emit Swap(msg.sender, agentToken, amountIn, netAmountOut, false);
 
         // update metrics
         _updateMetrics(pair, agentToken);
 
-        // return quote
-        return quote;
+        // return net amount
+        return netAmountOut;
     }
 
     /**
@@ -459,31 +549,41 @@ contract Router is
         // bonding pair
         IPair bondingPair = IPair(pair);
 
-        // quote
-        uint256 quote = bondingPair.getAgentAmountOut(amountIn);
-        require(quote >= amountOutMin, "Insufficient output");
+        // Get gross amount out
+        uint256 grossAmountOut = bondingPair.getAgentAmountOut(amountIn);
+        
+        // Calculate net amount after tax
+        (uint256 netAmountOut, uint256 taxAmount) = _applyTax(grossAmountOut, buyTax);
+        require(netAmountOut >= amountOutMin, "Insufficient output");
 
-        // check holding
-        _checkMaxHold(pair, agentToken, to, quote);
+        // check holding with net amount
+        _checkMaxHold(pair, agentToken, to, netAmountOut);
         
         // Transfer tokens to pair
         IERC20(assetToken).safeTransferFrom(msg.sender, pair, amountIn);
         
-        // Execute swap
-        bondingPair.swap(0, amountIn, quote, 0);
-        bondingPair.transferTo(to, quote);
+        // Execute swap with gross amount
+        bondingPair.swap(0, amountIn, grossAmountOut, 0);
+        
+        // Transfer net amount to recipient
+        bondingPair.transferTo(to, netAmountOut);
+        
+        // Handle tax if applicable
+        if(taxAmount > 0) {
+            _sendTax(agentToken, bondingPair, false, taxAmount);
+        }
 
         // check graduation
         _checkGraduation(agentToken);
 
-        // emit swap
-        emit Swap(msg.sender, agentToken, amountIn, quote, true);
+        // emit swap using net amount
+        emit Swap(msg.sender, agentToken, amountIn, netAmountOut, true);
 
         // update metrics
         _updateMetrics(pair, agentToken);
 
-        // return quote
-        return quote;
+        // return net amount
+        return netAmountOut;
     }
 
     /**
@@ -507,14 +607,27 @@ contract Router is
         // bonding pair
         IPair bondingPair = IPair(pair);
 
-        // Calculate required input
-        amountIn = _getAgentIn(agentToken, amountOut);
+        // Calculate gross amount needed (pre-tax amount)
+        uint256 grossAmountOut = (amountOut * BASIS_POINTS) / (BASIS_POINTS - sellTax);
+        
+        // Calculate required input for gross amount
+        amountIn = _getAgentIn(agentToken, grossAmountOut);
         require(amountIn <= amountInMax, "Excessive input required");
 
         // Transfer tokens to pair
         IERC20(agentToken).safeTransferFrom(msg.sender, pair, amountIn);
-        bondingPair.swap(amountIn, 0, 0, amountOut);
+        
+        // Execute swap
+        bondingPair.swap(amountIn, 0, 0, grossAmountOut);
+        
+        // Transfer net amount to recipient
         bondingPair.transferAsset(to, amountOut);
+        
+        // Handle tax if applicable
+        uint256 taxAmount = grossAmountOut - amountOut;
+        if(taxAmount > 0) {
+            _sendTax(agentToken, bondingPair, true, taxAmount);
+        }
 
         // check graduation
         _checkGraduation(agentToken);
@@ -525,7 +638,6 @@ contract Router is
         // update metrics
         _updateMetrics(pair, agentToken);
 
-        // return amountIn
         return amountIn;
     }
 
@@ -550,19 +662,30 @@ contract Router is
         // bonding pair
         IPair bondingPair = IPair(pair);
 
-        // Calculate required input
-        amountIn = _getAssetIn(agentToken, amountOut);
+        // Calculate gross amount needed (pre-tax amount)
+        uint256 grossAmountOut = (amountOut * BASIS_POINTS) / (BASIS_POINTS - buyTax);
+        
+        // Calculate required input for gross amount
+        amountIn = _getAssetIn(agentToken, grossAmountOut);
         require(amountIn <= amountInMax, "Excessive input required");
 
-        // check holding
+        // check holding limits with net amount
         _checkMaxHold(pair, agentToken, to, amountOut);
 
         // Transfer tokens to pair
         IERC20(assetToken).safeTransferFrom(msg.sender, pair, amountIn);
 
         // Execute swap
-        bondingPair.swap(0, amountIn, amountOut, 0);
+        bondingPair.swap(0, amountIn, grossAmountOut, 0);
+        
+        // Transfer net amount to recipient
         bondingPair.transferTo(to, amountOut);
+        
+        // Handle tax if applicable
+        uint256 taxAmount = grossAmountOut - amountOut;
+        if(taxAmount > 0) {
+            _sendTax(agentToken, bondingPair, false, taxAmount);
+        }
 
         // check graduation
         _checkGraduation(agentToken);
@@ -573,7 +696,6 @@ contract Router is
         // update metrics
         _updateMetrics(pair, agentToken);
 
-        // retourn amountIn
         return amountIn;
     }
 
@@ -630,7 +752,7 @@ contract Router is
         IManager manager = IManager(factory.manager());
 
         // should graduate
-        (bool shouldGraduate,) = manager.checkGraduation(agentToken);
+        bool shouldGraduate = manager.checkGraduation(agentToken);
 
         // check graduation
         if (shouldGraduate) {
@@ -692,5 +814,25 @@ contract Router is
         );
         maxHold = maxHold_;
         emit MaxHoldUpdated(maxHold_);
+    }
+
+    /**
+     * @notice Updates buy tax
+     * @param buyTax_ New buy tax
+     */
+    function setBuyTax(
+        uint256 buyTax_
+    ) external onlyRole(ADMIN_ROLE) {
+        buyTax = buyTax_;
+    }
+
+    /**
+     * @notice Updates sell tax
+     * @param sellTax_ New sell tax
+     */
+    function setSellTax(
+        uint256 sellTax_
+    ) external onlyRole(ADMIN_ROLE) {
+        sellTax = sellTax_;
     }
 }

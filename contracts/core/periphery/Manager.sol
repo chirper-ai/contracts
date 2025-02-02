@@ -11,11 +11,18 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
 import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+
+// uniswap v3
 import "../../interfaces/UniswapV3/IUniswapV3Pool.sol";
 import "../../interfaces/UniswapV3/IUniswapV3Factory.sol";
 import "../../interfaces/UniswapV3/INonfungiblePositionManager.sol";
+
+// velodrome
+import "../../interfaces/Velodrome/IVelodromePool.sol";
 import "../../interfaces/Velodrome/IVelodromeRouter.sol";
 import "../../interfaces/Velodrome/IVelodromeFactory.sol";
+
+// internal
 import "../../interfaces/IRouter.sol";
 import "../../interfaces/IFactory.sol";
 import "../../interfaces/IPair.sol";
@@ -87,6 +94,7 @@ contract Manager is
         uint24 fee;
         uint24 weight;
         DexType dexType;
+        uint24 slippage;
     }
 
     /**
@@ -129,8 +137,8 @@ contract Manager is
     /// @notice Trading pair denominator token
     address public assetToken;
 
-    /// @notice Required reserve ratio for graduation (%)
-    uint256 public gradThreshold;
+    /// @notice Required graduation reserve amount
+    uint256 public gradReserve;
 
     /// @notice Token data storage
     mapping(address => AgentProfile) public agentProfile;
@@ -190,12 +198,12 @@ contract Manager is
      * @notice Configures contract parameters
      * @param factory_ Token factory address
      * @param assetToken_ Quote token address
-     * @param gradThreshold_ Target reserve ratio
+     * @param gradReserve_ Target reserve ratio
      */
     function initialize(
         address factory_,
         address assetToken_,
-        uint256 gradThreshold_
+        uint256 gradReserve_
     ) external initializer {
         __AccessControl_init();
         __ReentrancyGuard_init();
@@ -208,7 +216,7 @@ contract Manager is
 
         factory = IFactory(factory_);
         assetToken = assetToken_;
-        gradThreshold = gradThreshold_;
+        gradReserve = gradReserve_;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -260,25 +268,73 @@ contract Manager is
     }
 
     /**
-     * @notice Evaluates graduation eligibility
+     * @notice Checks if token is ready for graduation
      * @param token Token address
-     * @return shouldGraduate Graduation status
-     * @return reserveRatio Current ratio
+     * @return Graduation readiness
      */
     function checkGraduation(
         address token
-    ) external view returns (bool shouldGraduate, uint256 reserveRatio) {
+    ) external view returns (bool) {
         AgentProfile storage info = agentProfile[token];
-        if (info.dexPools.length > 0) return (false, 0);
+        if (info.dexPools.length > 0) return false;
 
         IPair pair = IPair(info.bondingPair);
-        (uint256 reserveAgent,,) = pair.getReserves();
-        uint256 totalSupply = IERC20(token).totalSupply();
-        
-        if (totalSupply == 0 || reserveAgent == 0) return (false, 0);
+        (,uint256 reserveAsset,) = pair.getReserves();
 
-        reserveRatio = (reserveAgent * BASIS_POINTS) / totalSupply;
-        return (reserveRatio <= gradThreshold, reserveRatio);
+        // check reserve above grad
+        if (reserveAsset >= gradReserve) return true;
+
+        // return false
+        return false;
+    }
+
+    /**
+     * @notice Collects accumulated fees from all DEX pools
+     * @param token Token address to collect fees for
+     * @return tokenAmount Amount of token fees collected
+     * @return assetAmount Amount of asset token fees collected
+     */
+    function collectFees(
+        address token
+    ) external nonReentrant returns (uint256 tokenAmount, uint256 assetAmount) {
+        AgentProfile storage info = agentProfile[token];
+        require(info.dexPools.length > 0, "Not graduated");
+
+        for (uint i = 0; i < info.dexConfigs.length; i++) {
+            DexConfig memory config = info.dexConfigs[i];
+            address pool = info.dexPools[i];
+
+            (uint256 tokenFees, uint256 assetFees) = _collectFeesFromDex(
+                token,
+                pool,
+                config.router,
+                config.dexType,
+                config.fee
+            );
+
+            tokenAmount += tokenFees;
+            assetAmount += assetFees;
+        }
+
+        // split fees in half for token creator and platform treasury
+        uint256 platformToken = tokenAmount / 2;
+        uint256 platformAsset = assetAmount / 2;
+        uint256 creatorToken = tokenAmount - platformToken;
+        uint256 creatorAsset = assetAmount - platformAsset;
+
+        // require > 0
+        require(creatorToken > 0 || creatorAsset > 0, "No fees to collect");
+
+        // get token
+        IToken agentToken_ = IToken(token);
+        IERC20 assetToken_ = IERC20(assetToken);
+        address creator = agentToken_.creator();
+
+        // transfer to
+        if (creatorToken > 0) agentToken_.transfer(creator, creatorToken);
+        if (creatorAsset > 0) assetToken_.safeTransfer(creator, creatorAsset);
+        if (platformToken > 0) agentToken_.transfer(factory.platformTreasury(), platformToken);
+        if (platformAsset > 0) assetToken_.safeTransfer(factory.platformTreasury(), platformAsset);
     }
 
     /**
@@ -286,7 +342,8 @@ contract Manager is
      * @param token Token address
      */
     function graduate(address token) external nonReentrant {
-        require(msg.sender == factory.router(), "Only router");
+        address router = factory.router();
+        require(msg.sender == router, "Only router");
         
         AgentProfile storage info = agentProfile[token];
         require(info.dexPools.length == 0, "Already graduated");
@@ -296,7 +353,7 @@ contract Manager is
         require(tokenBalance > 0 && assetBalance > 0, "Insufficient liquidity");
 
         // Transfer liquidity
-        IRouter(factory.router()).transferLiquidityToManager(
+        IRouter(router).transferLiquidityToManager(
             token,
             tokenBalance,
             assetBalance
@@ -315,7 +372,8 @@ contract Manager is
                     token,
                     config.router,
                     tokenAmount,
-                    assetAmount
+                    assetAmount,
+                    config.slippage
                 );
             } else if (config.dexType == DexType.UniswapV3) {
                 pools[i] = _deployToV3(
@@ -323,14 +381,16 @@ contract Manager is
                     config.router,
                     tokenAmount,
                     assetAmount,
-                    config.fee
+                    config.fee,
+                    config.slippage
                 );
             } else {
                 pools[i] = _deployToVelo(
                     token,
                     config.router,
                     tokenAmount,
-                    assetAmount
+                    assetAmount,
+                    config.slippage
                 );
             }
         }
@@ -381,13 +441,45 @@ contract Manager is
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Updates graduation threshold
-     * @param gradThreshold_ New threshold value
+     * @notice Updates graduation reserve amount
+     * @param gradReserve_ New graduation reserve
      */
-    function setGradThreshold(
-        uint256 gradThreshold_
+    function setGradReserve(
+        uint256 gradReserve_
     ) external onlyRole(ADMIN_ROLE) {
-        gradThreshold = gradThreshold_;
+        gradReserve = gradReserve_;
+    }
+
+    /**
+     * @notice sets dex configs
+     * @param token Token address
+     * @param dexConfigs Dex configurations
+     * @dev Only admin
+     */
+    function setTokenDexConfigs(
+        address token,
+        DexConfig[] calldata dexConfigs
+    ) external onlyRole(ADMIN_ROLE) {
+        AgentProfile storage info = agentProfile[token];
+        require(info.creator != address(0), "Token not registered");
+
+        // check dex configs
+        uint24 totalWeight;
+        for (uint i = 0; i < dexConfigs.length; i++) {
+            require(dexConfigs[i].router != address(0), "Invalid router");
+            require(
+                dexConfigs[i].weight > 0 && 
+                dexConfigs[i].weight <= BASIS_POINTS,
+                "Invalid weight"
+            );
+            totalWeight += dexConfigs[i].weight;
+        }
+
+        // check total weight
+        require(totalWeight == BASIS_POINTS, "Invalid weights");
+
+        // update dex configs
+        info.dexConfigs = dexConfigs;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -400,13 +492,15 @@ contract Manager is
      * @param routerAddress Router contract
      * @param tokenAmount Token liquidity
      * @param assetAmount Asset liquidity
+     * @param slippage Maximum slippage
      * @return pool Pool address
      */
     function _deployToV2(
         address token,
         address routerAddress,
         uint256 tokenAmount,
-        uint256 assetAmount
+        uint256 assetAmount,
+        uint24 slippage
     ) internal returns (address pool) {
         IUniswapV2Router02 dexRouter = IUniswapV2Router02(routerAddress);
         IUniswapV2Factory dexFactory = IUniswapV2Factory(dexRouter.factory());
@@ -419,13 +513,18 @@ contract Manager is
         IERC20(token).forceApprove(routerAddress, tokenAmount);
         IERC20(assetToken).forceApprove(routerAddress, assetAmount);
 
+        // Calculate minimum amounts with slippage protection
+        // slippage is in basis points (100_000 = 100%)
+        uint256 minTokenAmount = (tokenAmount * (BASIS_POINTS - slippage)) / BASIS_POINTS;
+        uint256 minAssetAmount = (assetAmount * (BASIS_POINTS - slippage)) / BASIS_POINTS;
+
         dexRouter.addLiquidity(
             token,
             assetToken,
             tokenAmount,
             assetAmount,
-            0,
-            0,
+            minTokenAmount,
+            minAssetAmount,
             address(0),
             block.timestamp
         );
@@ -440,6 +539,7 @@ contract Manager is
      * @param tokenAmount Token liquidity
      * @param assetAmount Asset liquidity
      * @param fee Pool fee tier
+     * @param slippage Maximum slippage
      * @return pool Pool address
      */
     function _deployToV3(
@@ -447,7 +547,8 @@ contract Manager is
         address routerAddress,
         uint256 tokenAmount,
         uint256 assetAmount,
-        uint24 fee
+        uint24 fee,
+        uint24 slippage
     ) internal returns (address pool) {
         INonfungiblePositionManager posManager = INonfungiblePositionManager(routerAddress);
         IUniswapV3Factory v3Factory = IUniswapV3Factory(posManager.factory());
@@ -476,6 +577,11 @@ contract Manager is
         int24 tickLower = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
         int24 tickUpper = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
 
+        // Calculate minimum amounts with slippage protection
+        // slippage is in basis points (100_000 = 100%)
+        uint256 amount0Min = (amount0 * (BASIS_POINTS - slippage)) / BASIS_POINTS;
+        uint256 amount1Min = (amount1 * (BASIS_POINTS - slippage)) / BASIS_POINTS;
+
         // Mint full range position
         posManager.mint(
             INonfungiblePositionManager.MintParams({
@@ -486,8 +592,8 @@ contract Manager is
                 tickUpper: tickUpper,
                 amount0Desired: amount0,
                 amount1Desired: amount1,
-                amount0Min: 0,
-                amount1Min: 0,
+                amount0Min: amount0Min,
+                amount1Min: amount1Min,
                 recipient: address(this),
                 deadline: block.timestamp + 3600
             })
@@ -502,39 +608,149 @@ contract Manager is
      * @param routerAddress Router contract
      * @param tokenAmount Token liquidity
      * @param assetAmount Asset liquidity
+     * @param slippage Maximum slippage
      * @return pool Pool address
      */
     function _deployToVelo(
         address token,
         address routerAddress,
         uint256 tokenAmount,
-        uint256 assetAmount
+        uint256 assetAmount,
+        uint24 slippage
     ) internal returns (address pool) {
+        // Check input addresses
+        require(token != address(0), "Token address is zero");
+        require(routerAddress != address(0), "Router address is zero");
+
+        // Sort tokens
+        (address token0, address token1) = token < assetToken ? (token, assetToken) : (assetToken, token);
+        (uint256 amount0, uint256 amount1) = token < assetToken ? (tokenAmount, assetAmount) : (assetAmount, tokenAmount);
+        
+        // get factory or router
         IVelodromeRouter router = IVelodromeRouter(routerAddress);
         IVelodromeFactory veloFactory = IVelodromeFactory(router.factory());
-
-        IERC20(token).forceApprove(routerAddress, tokenAmount);
-        IERC20(assetToken).forceApprove(routerAddress, assetAmount);
-
-        // Use volatile pool type
+        
+        // Get or create pool
         bool stable = false;
-        pool = veloFactory.getPair(token, assetToken, stable);
+        uint24 fee = 0;
+        pool = veloFactory.getPool(token0, token1, fee);
         if (pool == address(0)) {
-            pool = veloFactory.createPair(token, assetToken, stable);
+            pool = veloFactory.createPool(token0, token1, fee);
         }
+        require(pool != address(0), "Pool creation succeeded");
+        
+        // Approve router to spend tokens
+        IERC20(token0).forceApprove(routerAddress, amount0);
+        IERC20(token1).forceApprove(routerAddress, amount1);
 
+        // Calculate minimum amounts with slippage protection
+        // slippage is in basis points (100_000 = 100%)
+        uint256 amount0Min = (amount0 * (BASIS_POINTS - slippage)) / BASIS_POINTS;
+        uint256 amount1Min = (amount1 * (BASIS_POINTS - slippage)) / BASIS_POINTS;
+
+        // Add liquidity
         router.addLiquidity(
-            token,
-            assetToken,
+            token0,
+            token1,
             stable,
-            tokenAmount,
-            assetAmount,
-            0,
-            0,
+            amount0,
+            amount1,
+            amount0Min,
+            amount1Min,
             address(this),
             block.timestamp
         );
 
+        // Verify final pool state
         return pool;
+    }
+
+    /**
+     * @notice Routes fee collection to appropriate DEX handler
+     * @param token Token address
+     * @param pool Pool address
+     * @param router Router/manager address
+     * @param dexType Protocol identifier
+     * @param fee Fee tier (UniV3)
+     */
+    function _collectFeesFromDex(
+        address token,
+        address pool,
+        address router,
+        DexType dexType,
+        uint24 fee
+    ) internal returns (uint256 tokenAmount, uint256 assetAmount) {
+        if (dexType == DexType.UniswapV2) {
+            return _collectFromV2(token, pool);
+        } else if (dexType == DexType.UniswapV3) {
+            return _collectFromV3(token, router);
+        } else {
+            return _collectFromVelo(token, pool);
+        }
+    }
+
+    /**
+     * @notice Collects fees from Uniswap V2 pool
+     * @param token Token address
+     * @param pool Pool address
+     */
+    function _collectFromV2(
+        address token,
+        address pool
+    ) internal returns (uint256 tokenAmount, uint256 assetAmount) {
+        // V2 fees are collected automatically when LPs remove liquidity
+        // or when new liquidity is added, so no explicit collection needed
+        return (0, 0);
+    }
+
+    /**
+     * @notice Collects fees from Uniswap V3 pool
+     * @param token Token address
+     * @param posManager Position manager address
+     */
+    function _collectFromV3(
+        address token,
+        address posManager
+    ) internal returns (uint256 tokenAmount, uint256 assetAmount) {
+        INonfungiblePositionManager manager = INonfungiblePositionManager(posManager);
+        
+        // Get position ID for this pool
+        uint256 tokenId; // Need to track/store position IDs
+        if (tokenId == 0) return (0, 0);
+
+        // Collect fees
+        (tokenAmount, assetAmount) = manager.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
+
+        // Map amounts to correct tokens
+        if (token > assetToken) {
+            (tokenAmount, assetAmount) = (assetAmount, tokenAmount);
+        }
+    }
+
+    /**
+     * @notice Collects fees from Velodrome pool
+     * @param token Token address  
+     * @param pool Pool address
+     */
+    function _collectFromVelo(
+        address token,
+        address pool
+    ) internal returns (uint256 tokenAmount, uint256 assetAmount) {
+        // Call claimFees() which returns (amount0, amount1)
+        (uint256 amount0, uint256 amount1) = IVelodromePool(pool).claimFees();
+        
+        // Map returned amounts to token order (token0 is always the lower address)
+        if (token > assetToken) {
+            (tokenAmount, assetAmount) = (amount1, amount0);
+        } else {
+            (tokenAmount, assetAmount) = (amount0, amount1);
+        }
     }
 }

@@ -15,6 +15,7 @@ interface IManager {
         uint24 fee;
         uint24 weight;
         DexType dexType;
+        uint24 slippage;
     }
 
     struct AgentProfile {
@@ -57,7 +58,7 @@ interface IManager {
     function getDexPools(address token) external view returns (address[] memory);
     function getBondingPair(address token) external view returns (address);
     function tokenCount() external view returns (uint256);
-    function checkGraduation(address token) external view returns (bool shouldGraduate, uint256 reserveRatio);
+    function checkGraduation(address token) external view returns (bool);
 
     // State-Changing Functions
     function initialize(address factory_, address assetToken_, uint256 gradThreshold_) external;

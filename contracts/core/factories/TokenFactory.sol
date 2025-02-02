@@ -126,16 +126,11 @@ contract TokenFactory is Initializable, AccessControlUpgradeable {
             url,
             intention,
             manager,
-            creator,
-            platformTreasury
+            creator
         );
 
         // token address
         address token = address(newToken);
-        
-        // Configure tax exemptions
-        newToken.setTaxExempt(manager, true);
-        newToken.setTaxExempt(msg.sender, true);
 
         // move all token to factory
         newToken.transfer(msg.sender, initialSupply);
@@ -182,50 +177,5 @@ contract TokenFactory is Initializable, AccessControlUpgradeable {
     function setManager(address newManager) external onlyRole(ADMIN_ROLE) {
         require(newManager != address(0), "Invalid manager");
         manager = newManager;
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                            ADMIN TOKEN FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice Sets tax exemption status for an address
-     * @param token_ Token address
-     * @param account_ Account to update
-     * @param isExempt_ Whether account should be tax exempt
-     */
-    function setTokenTaxExempt(address token_, address account_, bool isExempt_) external onlyRole(ADMIN_ROLE) {
-        require(account_ != address(0), "Invalid account");
-        Token(token_).setTaxExempt(account_, isExempt_);
-    }
-
-    /**
-     * @notice Sets platform treasury address for a token
-     * @param token_ Token address
-     * @param treasury_ Address to receive tax fees
-     */
-    function setTokenPlatformTreasury(address token_, address treasury_) external onlyRole(ADMIN_ROLE) {
-        require(treasury_ != address(0), "Invalid treasury");
-        Token(token_).setPlatformTreasury(treasury_);
-    }
-
-    /**
-     * @notice Sets buy tax for a token
-     * @param token_ Token address
-     * @param buyTax_ New buy tax percentage
-     */
-    function setTokenBuyTax(address token_, uint256 buyTax_) external onlyRole(ADMIN_ROLE) {
-        require(buyTax_ <= 5_000, "Invalid tax");
-        Token(token_).setBuyTax(buyTax_);
-    }
-
-    /**
-     * @notice Sets sell tax for a token
-     * @param token_ Token address
-     * @param sellTax_ New sell tax percentage
-     */
-    function setTokenSellTax(address token_, uint256 sellTax_) external onlyRole(ADMIN_ROLE) {
-        require(sellTax_ <= 5_000, "Invalid tax");
-        Token(token_).setSellTax(sellTax_);
     }
 }
