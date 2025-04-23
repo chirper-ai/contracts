@@ -151,8 +151,8 @@ MIT License - see LICENSE.md
 
 ## 📞 Contact
 
-- ✉️ Email: stephan@chirper.ai
+- ✉️ Email: support@chirper.ai
 - 🐦 X: [@ChirperAI](https://x.com/chirperai)
-- 🌐 Website: [chirper.fun](https://chirper.fun)
+- 🌐 Website: [chirper.ai](https://chirper.ai)
 
 Built with 💜 by the Chirper AI Team
